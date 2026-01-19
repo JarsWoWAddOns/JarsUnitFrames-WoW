@@ -9,6 +9,8 @@ local defaults = {
     showPlayerFrame = true,
     showTargetFrame = true,
     showPetFrame = true,
+    showFocusFrame = true,
+    showTargetTargetFrame = true,
     frameScale = 1.0,
     showPercentages = true,
     unlocked = false,
@@ -20,12 +22,24 @@ local defaults = {
     mirrorTargetPosition = false,
     playerPos = { point = "TOPLEFT", x = 20, y = -20 },
     targetPos = { point = "TOPLEFT", x = 260, y = -20 },
+    focusPos = { point = "TOPLEFT", x = 500, y = -20 },
+    focusWidth = 220,
+    focusShowBuffs = true,
+    focusShowDebuffs = true,
+    totPos = { point = "TOPLEFT", x = 260, y = -100 },
+    totWidth = 150,
+    totShowBuffs = true,
+    totShowDebuffs = true,
+    petPos = { point = "TOPLEFT", x = 20, y = -200 },
+    petWidth = 150,
+    petShowBuffs = true,
+    petShowDebuffs = true,
     hidePlayerPermanentBuffs = false,  -- Hide player buffs without timers
     hideTargetPermanentBuffs = false,  -- Hide target buffs without timers
 }
 
 -- Frame references
-local playerFrame, targetFrame, petFrame, configFrame
+local playerFrame, targetFrame, petFrame, focusFrame, targetTargetFrame, configFrame
 
 -- Lookup table for player's units (used to avoid secret value comparison errors)
 local myUnits = { player = true, pet = true, vehicle = true }
@@ -680,6 +694,648 @@ local function CreateTargetFrame()
     return frame
 end
 
+-- Create Focus Frame
+function CreateFocusFrame()
+    local frame = CreateFrame("Button", "JarUnitFrameFocus", UIParent, "SecureUnitButtonTemplate")
+    frame:SetSize(220, 30)
+    frame:SetAttribute("unit", "focus")
+    frame:SetAttribute("*type1", "target")
+    frame:SetAttribute("*type2", "menu")
+    frame:RegisterForClicks("AnyUp")
+    
+    -- Register events
+    frame:RegisterEvent("PLAYER_TARGET_CHANGED")
+    frame:RegisterEvent("UNIT_HEALTH")
+    frame:RegisterEvent("UNIT_MAXHEALTH")
+    frame:RegisterEvent("UNIT_POWER_UPDATE")
+    frame:RegisterEvent("UNIT_MAXPOWER")
+    frame:RegisterEvent("UNIT_NAME_UPDATE")
+    frame:RegisterEvent("UNIT_LEVEL")
+    frame:RegisterEvent("UNIT_AURA")
+    frame:RegisterEvent("PLAYER_FOCUS_CHANGED")
+    
+    frame:SetScript("OnEvent", function(self, event, ...)
+        local unit = ...
+        if event == "PLAYER_FOCUS_CHANGED" or event == "PLAYER_TARGET_CHANGED" or (unit and unit == "focus") then
+            UpdateFocusFrame()
+            UpdateFocusBuffs()
+            UpdateFocusDebuffs()
+        end
+    end)
+    
+    -- RegisterUnitWatch for automatic show/hide
+    if not InCombatLockdown() then
+        RegisterUnitWatch(frame)
+    end
+    
+    -- Restore position or use default
+    if JarUnitFramesDB.focusPos then
+        RestoreFramePosition(frame, JarUnitFramesDB.focusPos)
+    else
+        frame:SetPoint("TOPLEFT", 500, -20)
+    end
+    
+    frame:SetScale(JarUnitFramesDB.frameScale)
+    
+    -- Make draggable
+    frame:SetMovable(true)
+    frame:RegisterForDrag("LeftButton")
+    frame:SetScript("OnDragStart", function(self)
+        if JarUnitFramesDB.unlocked then
+            self:StartMoving()
+        end
+    end)
+    frame:SetScript("OnDragStop", function(self)
+        if JarUnitFramesDB.unlocked then
+            self:StopMovingOrSizing()
+            local point, _, _, x, y = self:GetPoint()
+            JarUnitFramesDB.focusPos.point = point
+            JarUnitFramesDB.focusPos.x = x
+            JarUnitFramesDB.focusPos.y = y
+        end
+    end)
+    
+    -- Drop shadow
+    frame.shadow = frame:CreateTexture(nil, "BACKGROUND")
+    frame.shadow:SetPoint("TOPLEFT", -3, 3)
+    frame.shadow:SetPoint("BOTTOMRIGHT", 3, -3)
+    frame.shadow:SetColorTexture(0, 0, 0, JarUnitFramesDB.bgAlpha)
+    
+    local font = JarUnitFramesDB.font or "Fonts\\FRIZQT__.TTF"
+    local fontSize = JarUnitFramesDB.fontSize or 12
+    local texture = JarUnitFramesDB.texture or "Interface\\TargetingFrame\\UI-StatusBar"
+    
+    -- Health bar
+    frame.healthBar = CreateFrame("StatusBar", nil, frame)
+    frame.healthBar:SetSize(220, 20)
+    frame.healthBar:SetPoint("TOP", 0, 0)
+    frame.healthBar:EnableMouse(false)
+    frame.healthBar:SetStatusBarTexture(texture)
+    frame.healthBar:SetStatusBarColor(1, 0, 0)
+    frame.healthBar:SetMinMaxValues(0, 100)
+    frame.healthBar:SetValue(0)
+    frame.healthBar:SetReverseFill(true)
+    
+    -- Health bar border
+    frame.healthBar.border = CreateFrame("Frame", nil, frame.healthBar, "BackdropTemplate")
+    frame.healthBar.border:SetAllPoints()
+    frame.healthBar.border:SetBackdrop({
+        edgeFile = "Interface\\Buttons\\WHITE8X8",
+        edgeSize = 1,
+    })
+    frame.healthBar.border:SetBackdropBorderColor(0, 0, 0, 1)
+    
+    -- Health bar background
+    frame.healthBar.bg = frame.healthBar:CreateTexture(nil, "BACKGROUND")
+    frame.healthBar.bg:SetAllPoints(frame.healthBar)
+    frame.healthBar.bg:SetTexture(texture)
+    frame.healthBar.bg:SetVertexColor(0.3, 0, 0)
+    
+    -- Health text
+    frame.healthText = frame.healthBar:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    frame.healthText:SetPoint("LEFT", frame.healthBar, "LEFT", 5, 0)
+    frame.healthText:SetText("0")
+    frame.healthText:SetJustifyH("LEFT")
+    frame.healthText:SetFont(font, fontSize, "OUTLINE")
+    
+    -- Level text
+    frame.levelText = frame.healthBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    frame.levelText:SetPoint("RIGHT", frame.healthBar, "RIGHT", -5, 0)
+    frame.levelText:SetFont(font, fontSize, "OUTLINE")
+    frame.levelText:SetText("")
+    
+    -- Power bar
+    frame.powerBar = CreateFrame("StatusBar", nil, frame)
+    frame.powerBar:SetSize(220, 8)
+    frame.powerBar:SetPoint("TOP", 0, -22)
+    frame.powerBar:EnableMouse(false)
+    frame.powerBar:SetStatusBarTexture(texture)
+    frame.powerBar:SetStatusBarColor(0, 0.4, 1)
+    frame.powerBar:SetMinMaxValues(0, 100)
+    frame.powerBar:SetValue(0)
+    frame.powerBar:SetReverseFill(true)
+    
+    -- Power bar border
+    frame.powerBar.border = CreateFrame("Frame", nil, frame.powerBar, "BackdropTemplate")
+    frame.powerBar.border:SetAllPoints()
+    frame.powerBar.border:SetBackdrop({
+        edgeFile = "Interface\\Buttons\\WHITE8X8",
+        edgeSize = 1,
+    })
+    frame.powerBar.border:SetBackdropBorderColor(0, 0, 0, 1)
+    
+    -- Power bar background
+    frame.powerBar.bg = frame.powerBar:CreateTexture(nil, "BACKGROUND")
+    frame.powerBar.bg:SetAllPoints(frame.powerBar)
+    frame.powerBar.bg:SetTexture(texture)
+    frame.powerBar.bg:SetVertexColor(0, 0, 0.4)
+    frame.powerBar.bg:SetAlpha(JarUnitFramesDB.bgAlpha)
+    
+    -- Name text
+    frame.name = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    frame.name:SetPoint("TOPRIGHT", frame.powerBar, "BOTTOMRIGHT", 0, -5)
+    frame.name:SetText("No Focus")
+    frame.name:SetJustifyH("RIGHT")
+    frame.name:SetFont(font, fontSize, "OUTLINE")
+    
+    -- Buff container (above the frame)
+    frame.buffs = {}
+    frame.buffContainer = CreateFrame("Frame", nil, frame)
+    frame.buffContainer:SetSize(220, 20)
+    frame.buffContainer:SetPoint("BOTTOMRIGHT", frame.healthBar, "TOPRIGHT", 0, 2)
+    
+    for i = 1, 40 do
+        local buff = CreateFrame("Frame", nil, frame.buffContainer)
+        buff:SetSize(18, 18)
+        
+        local col = (i - 1) % 10
+        local row = math.floor((i - 1) / 10)
+        buff:SetPoint("BOTTOMRIGHT", frame.buffContainer, "BOTTOMRIGHT", -col * 20, row * 20)
+        
+        buff.icon = buff:CreateTexture(nil, "ARTWORK")
+        buff.icon:SetAllPoints()
+        
+        buff.count = buff:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        buff.count:SetPoint("BOTTOMRIGHT", 2, 0)
+        buff.count:SetFont(font, 10, "OUTLINE")
+        
+        buff:SetScript("OnEnter", function(self)
+            pcall(function()
+                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                GameTooltip:SetUnitBuffByAuraInstanceID("focus", self.auraInstanceID)
+                GameTooltip:Show()
+            end)
+        end)
+        buff:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        
+        buff:Hide()
+        frame.buffs[i] = buff
+    end
+    
+    -- Debuff container (below the name)
+    frame.debuffs = {}
+    frame.debuffContainer = CreateFrame("Frame", nil, frame)
+    frame.debuffContainer:SetSize(220, 20)
+    frame.debuffContainer:SetPoint("TOPRIGHT", frame.name, "BOTTOMRIGHT", 0, -2)
+    
+    for i = 1, 40 do
+        local debuff = CreateFrame("Frame", nil, frame.debuffContainer)
+        debuff:SetSize(18, 18)
+        
+        local col = (i - 1) % 10
+        local row = math.floor((i - 1) / 10)
+        debuff:SetPoint("TOPRIGHT", frame.debuffContainer, "TOPRIGHT", -col * 20, -row * 20)
+        
+        debuff.icon = debuff:CreateTexture(nil, "ARTWORK")
+        debuff.icon:SetAllPoints()
+        
+        debuff.count = debuff:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        debuff.count:SetPoint("BOTTOMRIGHT", 2, 0)
+        debuff.count:SetFont(font, 10, "OUTLINE")
+        
+        debuff:SetScript("OnEnter", function(self)
+            pcall(function()
+                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                GameTooltip:SetUnitDebuffByAuraInstanceID("focus", self.auraInstanceID)
+                GameTooltip:Show()
+            end)
+        end)
+        debuff:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        
+        debuff:Hide()
+        frame.debuffs[i] = debuff
+    end
+    
+    frame:Show()
+    return frame
+end
+
+-- Create Target of Target Frame
+function CreateTargetTargetFrame()
+    local frame = CreateFrame("Button", "JarUnitFrameTargetTarget", UIParent, "SecureUnitButtonTemplate")
+    local width = JarUnitFramesDB.totWidth or 150
+    frame:SetSize(width, 30)
+    frame:SetAttribute("unit", "targettarget")
+    frame:SetAttribute("*type1", "target")
+    frame:SetAttribute("*type2", "menu")
+    frame:RegisterForClicks("AnyUp")
+    
+    -- Register events
+    frame:RegisterEvent("PLAYER_TARGET_CHANGED")
+    frame:RegisterEvent("UNIT_HEALTH")
+    frame:RegisterEvent("UNIT_MAXHEALTH")
+    frame:RegisterEvent("UNIT_POWER_UPDATE")
+    frame:RegisterEvent("UNIT_MAXPOWER")
+    frame:RegisterEvent("UNIT_NAME_UPDATE")
+    frame:RegisterEvent("UNIT_AURA")
+    
+    frame:SetScript("OnEvent", function(self, event, ...)
+        local unit = ...
+        if event == "PLAYER_TARGET_CHANGED" or (unit and unit == "targettarget") then
+            UpdateTargetTargetFrame()
+            if JarUnitFramesDB.totShowBuffs then
+                UpdateTargetTargetBuffs()
+            end
+            if JarUnitFramesDB.totShowDebuffs then
+                UpdateTargetTargetDebuffs()
+            end
+        end
+    end)
+    
+    -- RegisterUnitWatch for automatic show/hide
+    if not InCombatLockdown() then
+        RegisterUnitWatch(frame)
+    end
+    
+    -- Restore position or use default
+    if JarUnitFramesDB.totPos then
+        RestoreFramePosition(frame, JarUnitFramesDB.totPos)
+    else
+        frame:SetPoint("TOPLEFT", 260, -100)
+    end
+    
+    frame:SetScale(JarUnitFramesDB.frameScale)
+    
+    -- Make draggable
+    frame:SetMovable(true)
+    frame:RegisterForDrag("LeftButton")
+    frame:SetScript("OnDragStart", function(self)
+        if JarUnitFramesDB.unlocked then
+            self:StartMoving()
+        end
+    end)
+    frame:SetScript("OnDragStop", function(self)
+        if JarUnitFramesDB.unlocked then
+            self:StopMovingOrSizing()
+            local point, _, _, x, y = self:GetPoint()
+            JarUnitFramesDB.totPos.point = point
+            JarUnitFramesDB.totPos.x = x
+            JarUnitFramesDB.totPos.y = y
+        end
+    end)
+    
+    -- Drop shadow
+    frame.shadow = frame:CreateTexture(nil, "BACKGROUND")
+    frame.shadow:SetPoint("TOPLEFT", -3, 3)
+    frame.shadow:SetPoint("BOTTOMRIGHT", 3, -3)
+    frame.shadow:SetColorTexture(0, 0, 0, JarUnitFramesDB.bgAlpha)
+    
+    local font = JarUnitFramesDB.font or "Fonts\\FRIZQT__.TTF"
+    local fontSize = JarUnitFramesDB.fontSize or 12
+    local texture = JarUnitFramesDB.texture or "Interface\\TargetingFrame\\UI-StatusBar"
+    
+    -- Health bar
+    frame.healthBar = CreateFrame("StatusBar", nil, frame)
+    frame.healthBar:SetSize(width, 20)
+    frame.healthBar:SetPoint("TOP", 0, 0)
+    frame.healthBar:EnableMouse(false)
+    frame.healthBar:SetStatusBarTexture(texture)
+    frame.healthBar:SetStatusBarColor(1, 0, 0)
+    frame.healthBar:SetMinMaxValues(0, 100)
+    frame.healthBar:SetValue(0)
+    frame.healthBar:SetReverseFill(false)  -- Fill left to right for ToT
+    
+    -- Health bar border
+    frame.healthBar.border = CreateFrame("Frame", nil, frame.healthBar, "BackdropTemplate")
+    frame.healthBar.border:SetAllPoints()
+    frame.healthBar.border:SetBackdrop({
+        edgeFile = "Interface\\Buttons\\WHITE8X8",
+        edgeSize = 1,
+    })
+    frame.healthBar.border:SetBackdropBorderColor(0, 0, 0, 1)
+    
+    -- Health bar background
+    frame.healthBar.bg = frame.healthBar:CreateTexture(nil, "BACKGROUND")
+    frame.healthBar.bg:SetAllPoints(frame.healthBar)
+    frame.healthBar.bg:SetTexture(texture)
+    frame.healthBar.bg:SetVertexColor(0.3, 0, 0)
+    
+    -- Health text
+    frame.healthText = frame.healthBar:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    frame.healthText:SetPoint("LEFT", frame.healthBar, "LEFT", 5, 0)
+    frame.healthText:SetText("0")
+    frame.healthText:SetJustifyH("LEFT")
+    frame.healthText:SetFont(font, fontSize, "OUTLINE")
+    
+    -- Power bar
+    frame.powerBar = CreateFrame("StatusBar", nil, frame)
+    frame.powerBar:SetSize(width, 8)
+    frame.powerBar:SetPoint("TOP", 0, -22)
+    frame.powerBar:EnableMouse(false)
+    frame.powerBar:SetStatusBarTexture(texture)
+    frame.powerBar:SetStatusBarColor(0, 0.4, 1)
+    frame.powerBar:SetMinMaxValues(0, 100)
+    frame.powerBar:SetValue(0)
+    frame.powerBar:SetReverseFill(false)
+    
+    -- Power bar border
+    frame.powerBar.border = CreateFrame("Frame", nil, frame.powerBar, "BackdropTemplate")
+    frame.powerBar.border:SetAllPoints()
+    frame.powerBar.border:SetBackdrop({
+        edgeFile = "Interface\\Buttons\\WHITE8X8",
+        edgeSize = 1,
+    })
+    frame.powerBar.border:SetBackdropBorderColor(0, 0, 0, 1)
+    
+    -- Power bar background
+    frame.powerBar.bg = frame.powerBar:CreateTexture(nil, "BACKGROUND")
+    frame.powerBar.bg:SetAllPoints(frame.powerBar)
+    frame.powerBar.bg:SetTexture(texture)
+    frame.powerBar.bg:SetVertexColor(0, 0, 0.4)
+    frame.powerBar.bg:SetAlpha(JarUnitFramesDB.bgAlpha)
+    
+    -- Name text
+    frame.name = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    frame.name:SetPoint("TOPLEFT", frame.powerBar, "BOTTOMLEFT", 0, -5)
+    frame.name:SetText("No ToT")
+    frame.name:SetJustifyH("LEFT")
+    frame.name:SetFont(font, fontSize, "OUTLINE")
+    
+    -- Buff container (above the frame)
+    frame.buffs = {}
+    frame.buffContainer = CreateFrame("Frame", nil, frame)
+    frame.buffContainer:SetSize(width, 20)
+    frame.buffContainer:SetPoint("BOTTOMLEFT", frame.healthBar, "TOPLEFT", 0, 2)
+        
+    for i = 1, 20 do
+        local buff = CreateFrame("Frame", nil, frame.buffContainer)
+        buff:SetSize(18, 18)
+        
+        local col = (i - 1) % 7
+        local row = math.floor((i - 1) / 7)
+        buff:SetPoint("BOTTOMLEFT", frame.buffContainer, "BOTTOMLEFT", col * 20, row * 20)
+            
+            buff.icon = buff:CreateTexture(nil, "ARTWORK")
+            buff.icon:SetAllPoints()
+            
+            buff.count = buff:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            buff.count:SetPoint("BOTTOMRIGHT", 2, 0)
+            buff.count:SetFont(font, 10, "OUTLINE")
+            
+            buff:SetScript("OnEnter", function(self)
+                pcall(function()
+                    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                    GameTooltip:SetUnitBuffByAuraInstanceID("targettarget", self.auraInstanceID)
+                    GameTooltip:Show()
+                end)
+            end)
+            buff:SetScript("OnLeave", function() GameTooltip:Hide() end)
+            
+        buff:Hide()
+        frame.buffs[i] = buff
+    end
+    
+    -- Debuff container (below the name)
+    frame.debuffs = {}
+    frame.debuffContainer = CreateFrame("Frame", nil, frame)
+    frame.debuffContainer:SetSize(width, 20)
+    frame.debuffContainer:SetPoint("TOPLEFT", frame.name, "BOTTOMLEFT", 0, -2)
+    
+    for i = 1, 20 do
+        local debuff = CreateFrame("Frame", nil, frame.debuffContainer)
+        debuff:SetSize(18, 18)
+        
+        local col = (i - 1) % 7
+        local row = math.floor((i - 1) / 7)
+        debuff:SetPoint("TOPLEFT", frame.debuffContainer, "TOPLEFT", col * 20, -row * 20)
+        
+        debuff.icon = debuff:CreateTexture(nil, "ARTWORK")
+        debuff.icon:SetAllPoints()
+        
+        debuff.count = debuff:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        debuff.count:SetPoint("BOTTOMRIGHT", 2, 0)
+        debuff.count:SetFont(font, 10, "OUTLINE")
+        
+        debuff:SetScript("OnEnter", function(self)
+            pcall(function()
+                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                GameTooltip:SetUnitDebuffByAuraInstanceID("targettarget", self.auraInstanceID)
+                GameTooltip:Show()
+            end)
+        end)
+        debuff:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        
+        debuff:Hide()
+        frame.debuffs[i] = debuff
+    end
+    
+    frame:Show()
+    return frame
+end
+
+-- Create Pet Frame
+function CreatePetFrame()
+    local frame = CreateFrame("Button", "JarUnitFramePet", UIParent, "SecureUnitButtonTemplate")
+    local width = JarUnitFramesDB.petWidth or 150
+    frame:SetSize(width, 30)
+    frame:SetAttribute("unit", "pet")
+    frame:SetAttribute("*type1", "target")
+    frame:SetAttribute("*type2", "menu")
+    frame:RegisterForClicks("AnyUp")
+    
+    -- Register events
+    frame:RegisterEvent("UNIT_PET")
+    frame:RegisterEvent("UNIT_HEALTH")
+    frame:RegisterEvent("UNIT_MAXHEALTH")
+    frame:RegisterEvent("UNIT_POWER_UPDATE")
+    frame:RegisterEvent("UNIT_MAXPOWER")
+    frame:RegisterEvent("UNIT_NAME_UPDATE")
+    frame:RegisterEvent("UNIT_AURA")
+    
+    frame:SetScript("OnEvent", function(self, event, ...)
+        local unit = ...
+        if event == "UNIT_PET" or (unit and unit == "pet") then
+            UpdatePetFrame()
+            if JarUnitFramesDB.petShowBuffs then
+                UpdatePetBuffs()
+            end
+            if JarUnitFramesDB.petShowDebuffs then
+                UpdatePetDebuffs()
+            end
+        end
+    end)
+    
+    -- RegisterUnitWatch for automatic show/hide
+    if not InCombatLockdown() then
+        RegisterUnitWatch(frame)
+    end
+    
+    -- Restore position or use default
+    if JarUnitFramesDB.petPos then
+        RestoreFramePosition(frame, JarUnitFramesDB.petPos)
+    else
+        frame:SetPoint("TOPLEFT", 20, -200)
+    end
+    
+    frame:SetScale(JarUnitFramesDB.frameScale)
+    
+    -- Make draggable
+    frame:SetMovable(true)
+    frame:RegisterForDrag("LeftButton")
+    frame:SetScript("OnDragStart", function(self)
+        if JarUnitFramesDB.unlocked then
+            self:StartMoving()
+        end
+    end)
+    frame:SetScript("OnDragStop", function(self)
+        if JarUnitFramesDB.unlocked then
+            self:StopMovingOrSizing()
+            local point, _, _, x, y = self:GetPoint()
+            JarUnitFramesDB.petPos.point = point
+            JarUnitFramesDB.petPos.x = x
+            JarUnitFramesDB.petPos.y = y
+        end
+    end)
+    
+    -- Drop shadow
+    frame.shadow = frame:CreateTexture(nil, "BACKGROUND")
+    frame.shadow:SetPoint("TOPLEFT", -3, 3)
+    frame.shadow:SetPoint("BOTTOMRIGHT", 3, -3)
+    frame.shadow:SetColorTexture(0, 0, 0, JarUnitFramesDB.bgAlpha)
+    
+    local font = JarUnitFramesDB.font or "Fonts\\FRIZQT__.TTF"
+    local fontSize = JarUnitFramesDB.fontSize or 12
+    local texture = JarUnitFramesDB.texture or "Interface\\TargetingFrame\\UI-StatusBar"
+    
+    -- Health bar
+    frame.healthBar = CreateFrame("StatusBar", nil, frame)
+    frame.healthBar:SetSize(width, 20)
+    frame.healthBar:SetPoint("TOP", 0, 0)
+    frame.healthBar:EnableMouse(false)
+    frame.healthBar:SetStatusBarTexture(texture)
+    frame.healthBar:SetStatusBarColor(1, 0, 0)
+    frame.healthBar:SetMinMaxValues(0, 100)
+    frame.healthBar:SetValue(0)
+    frame.healthBar:SetReverseFill(false)
+    
+    -- Health bar border
+    frame.healthBar.border = CreateFrame("Frame", nil, frame.healthBar, "BackdropTemplate")
+    frame.healthBar.border:SetAllPoints()
+    frame.healthBar.border:SetBackdrop({
+        edgeFile = "Interface\\Buttons\\WHITE8X8",
+        edgeSize = 1,
+    })
+    frame.healthBar.border:SetBackdropBorderColor(0, 0, 0, 1)
+    
+    -- Health bar background
+    frame.healthBar.bg = frame.healthBar:CreateTexture(nil, "BACKGROUND")
+    frame.healthBar.bg:SetAllPoints(frame.healthBar)
+    frame.healthBar.bg:SetTexture(texture)
+    frame.healthBar.bg:SetVertexColor(0.3, 0, 0)
+    
+    -- Health text
+    frame.healthText = frame.healthBar:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    frame.healthText:SetPoint("LEFT", frame.healthBar, "LEFT", 5, 0)
+    frame.healthText:SetText("0")
+    frame.healthText:SetJustifyH("LEFT")
+    frame.healthText:SetFont(font, fontSize, "OUTLINE")
+    
+    -- Power bar
+    frame.powerBar = CreateFrame("StatusBar", nil, frame)
+    frame.powerBar:SetSize(width, 8)
+    frame.powerBar:SetPoint("TOP", 0, -22)
+    frame.powerBar:EnableMouse(false)
+    frame.powerBar:SetStatusBarTexture(texture)
+    frame.powerBar:SetStatusBarColor(0, 0.4, 1)
+    frame.powerBar:SetMinMaxValues(0, 100)
+    frame.powerBar:SetValue(0)
+    frame.powerBar:SetReverseFill(false)
+    
+    -- Power bar border
+    frame.powerBar.border = CreateFrame("Frame", nil, frame.powerBar, "BackdropTemplate")
+    frame.powerBar.border:SetAllPoints()
+    frame.powerBar.border:SetBackdrop({
+        edgeFile = "Interface\\Buttons\\WHITE8X8",
+        edgeSize = 1,
+    })
+    frame.powerBar.border:SetBackdropBorderColor(0, 0, 0, 1)
+    
+    -- Power bar background
+    frame.powerBar.bg = frame.powerBar:CreateTexture(nil, "BACKGROUND")
+    frame.powerBar.bg:SetAllPoints(frame.powerBar)
+    frame.powerBar.bg:SetTexture(texture)
+    frame.powerBar.bg:SetVertexColor(0, 0, 0.4)
+    frame.powerBar.bg:SetAlpha(JarUnitFramesDB.bgAlpha)
+    
+    -- Name text
+    frame.name = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    frame.name:SetPoint("TOPLEFT", frame.powerBar, "BOTTOMLEFT", 0, -5)
+    frame.name:SetText("No Pet")
+    frame.name:SetJustifyH("LEFT")
+    frame.name:SetFont(font, fontSize, "OUTLINE")
+    
+    -- Buff container (above the frame)
+    frame.buffs = {}
+    frame.buffContainer = CreateFrame("Frame", nil, frame)
+    frame.buffContainer:SetSize(width, 20)
+    frame.buffContainer:SetPoint("BOTTOMLEFT", frame.healthBar, "TOPLEFT", 0, 2)
+    
+    for i = 1, 20 do
+        local buff = CreateFrame("Frame", nil, frame.buffContainer)
+        buff:SetSize(18, 18)
+        
+        local col = (i - 1) % 7
+        local row = math.floor((i - 1) / 7)
+        buff:SetPoint("BOTTOMLEFT", frame.buffContainer, "BOTTOMLEFT", col * 20, row * 20)
+        
+        buff.icon = buff:CreateTexture(nil, "ARTWORK")
+        buff.icon:SetAllPoints()
+        
+        buff.count = buff:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        buff.count:SetPoint("BOTTOMRIGHT", 2, 0)
+        buff.count:SetFont(font, 10, "OUTLINE")
+        
+        buff:SetScript("OnEnter", function(self)
+            pcall(function()
+                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                GameTooltip:SetUnitBuffByAuraInstanceID("pet", self.auraInstanceID)
+                GameTooltip:Show()
+            end)
+        end)
+        buff:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        
+        buff:Hide()
+        frame.buffs[i] = buff
+    end
+    
+    -- Debuff container (below the name)
+    frame.debuffs = {}
+    frame.debuffContainer = CreateFrame("Frame", nil, frame)
+    frame.debuffContainer:SetSize(width, 20)
+    frame.debuffContainer:SetPoint("TOPLEFT", frame.name, "BOTTOMLEFT", 0, -2)
+    
+    for i = 1, 20 do
+        local debuff = CreateFrame("Frame", nil, frame.debuffContainer)
+        debuff:SetSize(18, 18)
+        
+        local col = (i - 1) % 7
+        local row = math.floor((i - 1) / 7)
+        debuff:SetPoint("TOPLEFT", frame.debuffContainer, "TOPLEFT", col * 20, -row * 20)
+        
+        debuff.icon = debuff:CreateTexture(nil, "ARTWORK")
+        debuff.icon:SetAllPoints()
+        
+        debuff.count = debuff:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        debuff.count:SetPoint("BOTTOMRIGHT", 2, 0)
+        debuff.count:SetFont(font, 10, "OUTLINE")
+        
+        debuff:SetScript("OnEnter", function(self)
+            pcall(function()
+                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                GameTooltip:SetUnitDebuffByAuraInstanceID("pet", self.auraInstanceID)
+                GameTooltip:Show()
+            end)
+        end)
+        debuff:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        
+        debuff:Hide()
+        frame.debuffs[i] = debuff
+    end
+    
+    frame:Show()
+    return frame
+end
+
 -- Update player buffs
 function UpdatePlayerBuffs()
     if not playerFrame or not playerFrame.buffs then return end
@@ -969,10 +1625,393 @@ function UpdateTargetFrame()
     end
 end
 
+-- Update focus buffs
+function UpdateFocusBuffs()
+    if not focusFrame or not focusFrame.buffs then return end
+    
+    -- Hide all buffs if disabled or no focus
+    if not JarUnitFramesDB.focusShowBuffs or not UnitExists("focus") then
+        for i = 1, 40 do
+            focusFrame.buffs[i]:Hide()
+        end
+        return
+    end
+    
+    local auras = C_UnitAuras.GetUnitAuras("focus", "HELPFUL", 40) or {}
+    local buffIndex = 1
+    
+    for _, auraData in ipairs(auras) do
+        if buffIndex > 40 then break end
+        
+        local buff = focusFrame.buffs[buffIndex]
+        buff.icon:SetTexture(auraData.icon)
+        buff.auraInstanceID = auraData.auraInstanceID
+        buff.count:SetText("")
+        
+        buff:Show()
+        buffIndex = buffIndex + 1
+    end
+    
+    -- Hide unused buff frames
+    for i = buffIndex, 40 do
+        focusFrame.buffs[i]:Hide()
+    end
+end
+
+-- Update focus debuffs
+function UpdateFocusDebuffs()
+    if not focusFrame or not focusFrame.debuffs then return end
+    
+    -- Hide all debuffs if disabled or no focus
+    if not JarUnitFramesDB.focusShowDebuffs or not UnitExists("focus") then
+        for i = 1, 40 do
+            focusFrame.debuffs[i]:Hide()
+        end
+        return
+    end
+    
+    local auras = C_UnitAuras.GetUnitAuras("focus", "HARMFUL", 40) or {}
+    local debuffIndex = 1
+    
+    for _, auraData in ipairs(auras) do
+        if debuffIndex > 40 then break end
+        
+        local debuff = focusFrame.debuffs[debuffIndex]
+        debuff.icon:SetTexture(auraData.icon)
+        debuff.auraInstanceID = auraData.auraInstanceID
+        debuff.count:SetText("")
+        
+        debuff:Show()
+        debuffIndex = debuffIndex + 1
+    end
+    
+    -- Hide unused debuff frames
+    for i = debuffIndex, 40 do
+        focusFrame.debuffs[i]:Hide()
+    end
+end
+
+-- Update focus frame
+function UpdateFocusFrame()
+    if not focusFrame then return end
+    
+    -- Check if we have a focus
+    if not UnitExists("focus") then
+        focusFrame:Hide()
+        return
+    end
+    
+    focusFrame:Show()
+    
+    -- Get focus name
+    local name = UnitName("focus")
+    focusFrame.name:SetText(name or "Unknown")
+    
+    -- Update level if enabled
+    if JarUnitFramesDB.showLevel and UnitLevel("focus") then
+        focusFrame.levelText:SetText(UnitLevel("focus"))
+    else
+        focusFrame.levelText:SetText("")
+    end
+    
+    -- Get health values
+    local health = UnitHealth("focus")
+    local maxHealth = UnitHealthMax("focus")
+    
+    focusFrame.healthBar:SetMinMaxValues(0, maxHealth)
+    focusFrame.healthBar:SetValue(health)
+    focusFrame.healthText:SetText(BreakUpLargeNumbers(health))
+    
+    -- Get power values
+    local power = UnitPower("focus")
+    local maxPower = UnitPowerMax("focus")
+    local powerType = UnitPowerType("focus")
+    
+    focusFrame.powerBar:SetMinMaxValues(0, maxPower)
+    focusFrame.powerBar:SetValue(power)
+    
+    -- Color power bar
+    local powerColor = PowerBarColor[powerType]
+    if powerColor then
+        focusFrame.powerBar:SetStatusBarColor(powerColor.r, powerColor.g, powerColor.b)
+        focusFrame.powerBar.bg:SetVertexColor(powerColor.r * 0.3, powerColor.g * 0.3, powerColor.b * 0.3)
+    end
+    
+    -- Color health bar by class/reaction
+    if UnitIsPlayer("focus") then
+        local _, class = UnitClass("focus")
+        if class and RAID_CLASS_COLORS[class] then
+            local classColor = RAID_CLASS_COLORS[class]
+            focusFrame.healthBar:SetStatusBarColor(classColor.r, classColor.g, classColor.b)
+            focusFrame.healthBar.bg:SetVertexColor(classColor.r * 0.3, classColor.g * 0.3, classColor.b * 0.3)
+        else
+            if UnitIsEnemy("player", "focus") then
+                focusFrame.healthBar:SetStatusBarColor(1, 0, 0)
+                focusFrame.healthBar.bg:SetVertexColor(0.3, 0, 0)
+            else
+                focusFrame.healthBar:SetStatusBarColor(0, 1, 0)
+                focusFrame.healthBar.bg:SetVertexColor(0, 0.3, 0)
+            end
+        end
+    else
+        local reaction = UnitReaction("focus", "player")
+        if reaction and reaction <= 3 then
+            focusFrame.healthBar:SetStatusBarColor(1, 0, 0)
+        elseif reaction and reaction >= 5 then
+            focusFrame.healthBar:SetStatusBarColor(0, 1, 0)
+        else
+            focusFrame.healthBar:SetStatusBarColor(1, 1, 0)
+        end
+    end
+end
+
+-- Update target of target buffs
+function UpdateTargetTargetBuffs()
+    if not targetTargetFrame or not targetTargetFrame.buffs then return end
+    
+    -- Hide all buffs if disabled or no targettarget
+    if not JarUnitFramesDB.totShowBuffs or not UnitExists("targettarget") then
+        for i = 1, 20 do
+            targetTargetFrame.buffs[i]:Hide()
+        end
+        return
+    end
+    
+    local auras = C_UnitAuras.GetUnitAuras("targettarget", "HELPFUL", 20) or {}
+    local buffIndex = 1
+    
+    for _, auraData in ipairs(auras) do
+        if buffIndex > 20 then break end
+        
+        local buff = targetTargetFrame.buffs[buffIndex]
+        buff.icon:SetTexture(auraData.icon)
+        buff.auraInstanceID = auraData.auraInstanceID
+        buff.count:SetText("")
+        
+        buff:Show()
+        buffIndex = buffIndex + 1
+    end
+    
+    -- Hide unused buff frames
+    for i = buffIndex, 20 do
+        targetTargetFrame.buffs[i]:Hide()
+    end
+end
+
+-- Update target of target debuffs
+function UpdateTargetTargetDebuffs()
+    if not targetTargetFrame or not targetTargetFrame.debuffs then return end
+    
+    -- Hide all debuffs if disabled or no targettarget
+    if not JarUnitFramesDB.totShowDebuffs or not UnitExists("targettarget") then
+        for i = 1, 20 do
+            targetTargetFrame.debuffs[i]:Hide()
+        end
+        return
+    end
+    
+    local auras = C_UnitAuras.GetUnitAuras("targettarget", "HARMFUL", 20) or {}
+    local debuffIndex = 1
+    
+    for _, auraData in ipairs(auras) do
+        if debuffIndex > 20 then break end
+        
+        local debuff = targetTargetFrame.debuffs[debuffIndex]
+        debuff.icon:SetTexture(auraData.icon)
+        debuff.auraInstanceID = auraData.auraInstanceID
+        debuff.count:SetText("")
+        
+        debuff:Show()
+        debuffIndex = debuffIndex + 1
+    end
+    
+    -- Hide unused debuff frames
+    for i = debuffIndex, 20 do
+        targetTargetFrame.debuffs[i]:Hide()
+    end
+end
+
+-- Update target of target frame
+function UpdateTargetTargetFrame()
+    if not targetTargetFrame then return end
+    
+    -- Check if we have a targettarget
+    if not UnitExists("targettarget") then
+        targetTargetFrame:Hide()
+        return
+    end
+    
+    targetTargetFrame:Show()
+    
+    -- Get targettarget name
+    local name = UnitName("targettarget")
+    targetTargetFrame.name:SetText(name or "Unknown")
+    
+    -- Get health values
+    local health = UnitHealth("targettarget")
+    local maxHealth = UnitHealthMax("targettarget")
+    
+    targetTargetFrame.healthBar:SetMinMaxValues(0, maxHealth)
+    targetTargetFrame.healthBar:SetValue(health)
+    targetTargetFrame.healthText:SetText(BreakUpLargeNumbers(health))
+    
+    -- Get power values
+    local power = UnitPower("targettarget")
+    local maxPower = UnitPowerMax("targettarget")
+    local powerType = UnitPowerType("targettarget")
+    
+    targetTargetFrame.powerBar:SetMinMaxValues(0, maxPower)
+    targetTargetFrame.powerBar:SetValue(power)
+    
+    -- Color power bar
+    local powerColor = PowerBarColor[powerType]
+    if powerColor then
+        targetTargetFrame.powerBar:SetStatusBarColor(powerColor.r, powerColor.g, powerColor.b)
+        targetTargetFrame.powerBar.bg:SetVertexColor(powerColor.r * 0.3, powerColor.g * 0.3, powerColor.b * 0.3)
+    end
+    
+    -- Color health bar by class/reaction
+    if UnitIsPlayer("targettarget") then
+        local _, class = UnitClass("targettarget")
+        if class and RAID_CLASS_COLORS[class] then
+            local classColor = RAID_CLASS_COLORS[class]
+            targetTargetFrame.healthBar:SetStatusBarColor(classColor.r, classColor.g, classColor.b)
+            targetTargetFrame.healthBar.bg:SetVertexColor(classColor.r * 0.3, classColor.g * 0.3, classColor.b * 0.3)
+        else
+            if UnitIsEnemy("player", "targettarget") then
+                targetTargetFrame.healthBar:SetStatusBarColor(1, 0, 0)
+                targetTargetFrame.healthBar.bg:SetVertexColor(0.3, 0, 0)
+            else
+                targetTargetFrame.healthBar:SetStatusBarColor(0, 1, 0)
+                targetTargetFrame.healthBar.bg:SetVertexColor(0, 0.3, 0)
+            end
+        end
+    else
+        local reaction = UnitReaction("targettarget", "player")
+        if reaction and reaction <= 3 then
+            targetTargetFrame.healthBar:SetStatusBarColor(1, 0, 0)
+        elseif reaction and reaction >= 5 then
+            targetTargetFrame.healthBar:SetStatusBarColor(0, 1, 0)
+        else
+            targetTargetFrame.healthBar:SetStatusBarColor(1, 1, 0)
+        end
+    end
+end
+
+-- Update pet buffs
+function UpdatePetBuffs()
+    if not petFrame or not petFrame.buffs then return end
+    
+    -- Hide all buffs if disabled or no pet
+    if not JarUnitFramesDB.petShowBuffs or not UnitExists("pet") then
+        for i = 1, 20 do
+            petFrame.buffs[i]:Hide()
+        end
+        return
+    end
+    
+    local auras = C_UnitAuras.GetUnitAuras("pet", "HELPFUL", 20) or {}
+    local buffIndex = 1
+    
+    for _, auraData in ipairs(auras) do
+        if buffIndex > 20 then break end
+        
+        local buff = petFrame.buffs[buffIndex]
+        buff.icon:SetTexture(auraData.icon)
+        buff.auraInstanceID = auraData.auraInstanceID
+        buff.count:SetText("")
+        
+        buff:Show()
+        buffIndex = buffIndex + 1
+    end
+    
+    -- Hide unused buff frames
+    for i = buffIndex, 20 do
+        petFrame.buffs[i]:Hide()
+    end
+end
+
+-- Update pet debuffs
+function UpdatePetDebuffs()
+    if not petFrame or not petFrame.debuffs then return end
+    
+    -- Hide all debuffs if disabled or no pet
+    if not JarUnitFramesDB.petShowDebuffs or not UnitExists("pet") then
+        for i = 1, 20 do
+            petFrame.debuffs[i]:Hide()
+        end
+        return
+    end
+    
+    local auras = C_UnitAuras.GetUnitAuras("pet", "HARMFUL", 20) or {}
+    local debuffIndex = 1
+    
+    for _, auraData in ipairs(auras) do
+        if debuffIndex > 20 then break end
+        
+        local debuff = petFrame.debuffs[debuffIndex]
+        debuff.icon:SetTexture(auraData.icon)
+        debuff.auraInstanceID = auraData.auraInstanceID
+        debuff.count:SetText("")
+        
+        debuff:Show()
+        debuffIndex = debuffIndex + 1
+    end
+    
+    -- Hide unused debuff frames
+    for i = debuffIndex, 20 do
+        petFrame.debuffs[i]:Hide()
+    end
+end
+
+-- Update pet frame
+function UpdatePetFrame()
+    if not petFrame then return end
+    
+    -- Check if we have a pet
+    if not UnitExists("pet") then
+        petFrame:Hide()
+        return
+    end
+    
+    petFrame:Show()
+    
+    -- Get pet name
+    local name = UnitName("pet")
+    petFrame.name:SetText(name or "Unknown")
+    
+    -- Get health values
+    local health = UnitHealth("pet")
+    local maxHealth = UnitHealthMax("pet")
+    
+    petFrame.healthBar:SetMinMaxValues(0, maxHealth)
+    petFrame.healthBar:SetValue(health)
+    petFrame.healthText:SetText(BreakUpLargeNumbers(health))
+    
+    -- Get power values
+    local power = UnitPower("pet")
+    local maxPower = UnitPowerMax("pet")
+    local powerType = UnitPowerType("pet")
+    
+    petFrame.powerBar:SetMinMaxValues(0, maxPower)
+    petFrame.powerBar:SetValue(power)
+    
+    -- Color power bar
+    local powerColor = PowerBarColor[powerType]
+    if powerColor then
+        petFrame.powerBar:SetStatusBarColor(powerColor.r, powerColor.g, powerColor.b)
+        petFrame.powerBar.bg:SetVertexColor(powerColor.r * 0.3, powerColor.g * 0.3, powerColor.b * 0.3)
+    end
+    
+    -- Color health bar (green for friendly pet)
+    petFrame.healthBar:SetStatusBarColor(0, 1, 0)
+    petFrame.healthBar.bg:SetVertexColor(0, 0.3, 0)
+end
+
 -- Create config window
 local function CreateConfigFrame()
     local frame = CreateFrame("Frame", "JUF_ConfigFrame", UIParent, "BasicFrameTemplateWithInset")
-    frame:SetSize(550, 550)
+    frame:SetSize(600, 700)
     frame:SetPoint("CENTER")
     frame:Hide()
     frame:SetMovable(true)
@@ -1018,7 +2057,7 @@ local function CreateConfigFrame()
     
     -- Scale slider
     local scaleSlider = CreateFrame("Slider", nil, frame, "OptionsSliderTemplate")
-    scaleSlider:SetPoint("TOPLEFT", 20, -140)
+    scaleSlider:SetPoint("TOPLEFT", 20, -210)
     scaleSlider:SetMinMaxValues(0.5, 2.0)
     scaleSlider:SetValue(JarUnitFramesDB.frameScale)
     scaleSlider:SetValueStep(0.1)
@@ -1036,6 +2075,15 @@ local function CreateConfigFrame()
         end
         if targetFrame then
             targetFrame:SetScale(value)
+        end
+        if focusFrame then
+            focusFrame:SetScale(value)
+        end
+        if targetTargetFrame then
+            targetTargetFrame:SetScale(value)
+        end
+        if petFrame then
+            petFrame:SetScale(value)
         end
     end)
     frame.scaleSlider = scaleSlider
@@ -1066,7 +2114,7 @@ local function CreateConfigFrame()
     
     -- Mirror Target Position checkbox
     local mirrorCheck = CreateFrame("CheckButton", "JARUNITFRAMESMirrorCheck", frame, "UICheckButtonTemplate")
-    mirrorCheck:SetPoint("TOPLEFT", showLevelCheck, "BOTTOMLEFT", 0, -5)
+    mirrorCheck:SetPoint("TOPLEFT", showLevelCheck, "BOTTOMLEFT", 0, -10)
     mirrorCheck.text = mirrorCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     mirrorCheck.text:SetPoint("LEFT", mirrorCheck, "RIGHT", 5, 0)
     mirrorCheck.text:SetText("Mirror Target Frame Position")
@@ -1094,9 +2142,300 @@ local function CreateConfigFrame()
     end)
     frame.mirrorCheck = mirrorCheck
     
+    -- Show Focus Frame checkbox (top right)
+    local showFocusCheck = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
+    showFocusCheck:SetPoint("TOPRIGHT", hideTargetPermBuffsCheck, "BOTTOMRIGHT", 0, -10)
+    showFocusCheck.text = showFocusCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    showFocusCheck.text:SetPoint("RIGHT", showFocusCheck, "LEFT", -5, 0)
+    showFocusCheck.text:SetText("Show Focus Frame")
+    showFocusCheck:SetChecked(JarUnitFramesDB.showFocusFrame)
+    showFocusCheck:SetScript("OnClick", function(self)
+        JarUnitFramesDB.showFocusFrame = self:GetChecked()
+        if JarUnitFramesDB.showFocusFrame then
+            if not focusFrame then
+                focusFrame = CreateFocusFrame()
+                UpdateFocusFrame()
+                UpdateFocusBuffs()
+                UpdateFocusDebuffs()
+            else
+                focusFrame:Show()
+            end
+        else
+            if focusFrame then
+                focusFrame:Hide()
+            end
+        end
+    end)
+    frame.showFocusCheck = showFocusCheck
+    
+    -- Focus Show Buffs checkbox (indented, right side)
+    local focusShowBuffsCheck = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
+    focusShowBuffsCheck:SetPoint("TOPRIGHT", showFocusCheck, "BOTTOMRIGHT", -20, -5)
+    focusShowBuffsCheck.text = focusShowBuffsCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    focusShowBuffsCheck.text:SetPoint("RIGHT", focusShowBuffsCheck, "LEFT", -5, 0)
+    focusShowBuffsCheck.text:SetText("Show Focus Buffs")
+    focusShowBuffsCheck:SetChecked(JarUnitFramesDB.focusShowBuffs)
+    focusShowBuffsCheck:SetScript("OnClick", function(self)
+        JarUnitFramesDB.focusShowBuffs = self:GetChecked()
+        if focusFrame and focusFrame.buffs then
+            if JarUnitFramesDB.focusShowBuffs then
+                UpdateFocusBuffs()
+            else
+                for i = 1, 40 do
+                    focusFrame.buffs[i]:Hide()
+                end
+            end
+        end
+    end)
+    frame.focusShowBuffsCheck = focusShowBuffsCheck
+    
+    -- Focus Show Debuffs checkbox (indented, right side)
+    local focusShowDebuffsCheck = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
+    focusShowDebuffsCheck:SetPoint("TOPRIGHT", focusShowBuffsCheck, "BOTTOMRIGHT", 0, -5)
+    focusShowDebuffsCheck.text = focusShowDebuffsCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    focusShowDebuffsCheck.text:SetPoint("RIGHT", focusShowDebuffsCheck, "LEFT", -5, 0)
+    focusShowDebuffsCheck.text:SetText("Show Focus Debuffs")
+    focusShowDebuffsCheck:SetChecked(JarUnitFramesDB.focusShowDebuffs)
+    focusShowDebuffsCheck:SetScript("OnClick", function(self)
+        JarUnitFramesDB.focusShowDebuffs = self:GetChecked()
+        if focusFrame and focusFrame.debuffs then
+            if JarUnitFramesDB.focusShowDebuffs then
+                UpdateFocusDebuffs()
+            else
+                for i = 1, 40 do
+                    focusFrame.debuffs[i]:Hide()
+                end
+            end
+        end
+    end)
+    frame.focusShowDebuffsCheck = focusShowDebuffsCheck
+    
+    -- Focus Width slider (right side)
+    local focusWidthSlider = CreateFrame("Slider", nil, frame, "OptionsSliderTemplate")
+    focusWidthSlider:SetPoint("TOPRIGHT", focusShowDebuffsCheck, "BOTTOMRIGHT", 20, -15)
+    focusWidthSlider:SetMinMaxValues(150, 300)
+    focusWidthSlider:SetValue(JarUnitFramesDB.focusWidth or 220)
+    focusWidthSlider:SetValueStep(10)
+    focusWidthSlider:SetObeyStepOnDrag(true)
+    focusWidthSlider:SetWidth(200)
+    focusWidthSlider.Text = focusWidthSlider:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    focusWidthSlider.Text:SetPoint("BOTTOM", focusWidthSlider, "TOP", 0, 5)
+    focusWidthSlider.Text:SetText("Focus Width: " .. (JarUnitFramesDB.focusWidth or 220))
+    focusWidthSlider:SetScript("OnValueChanged", function(self, value)
+        value = math.floor(value / 10 + 0.5) * 10
+        JarUnitFramesDB.focusWidth = value
+        self.Text:SetText("Focus Width: " .. value)
+        if focusFrame then
+            focusFrame:SetWidth(value)
+            focusFrame.healthBar:SetWidth(value)
+            focusFrame.powerBar:SetWidth(value)
+            if focusFrame.buffContainer then
+                focusFrame.buffContainer:SetWidth(value)
+            end
+            if focusFrame.debuffContainer then
+                focusFrame.debuffContainer:SetWidth(value)
+            end
+        end
+    end)
+    frame.focusWidthSlider = focusWidthSlider
+    
+    -- Show Target of Target Frame checkbox (right side)
+    local showToTCheck = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
+    showToTCheck:SetPoint("TOPRIGHT", focusWidthSlider, "BOTTOMRIGHT", 0, -25)
+    showToTCheck.text = showToTCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    showToTCheck.text:SetPoint("RIGHT", showToTCheck, "LEFT", -5, 0)
+    showToTCheck.text:SetText("Show Target of Target Frame")
+    showToTCheck:SetChecked(JarUnitFramesDB.showTargetTargetFrame)
+    showToTCheck:SetScript("OnClick", function(self)
+        JarUnitFramesDB.showTargetTargetFrame = self:GetChecked()
+        if JarUnitFramesDB.showTargetTargetFrame then
+            if not targetTargetFrame then
+                targetTargetFrame = CreateTargetTargetFrame()
+                UpdateTargetTargetFrame()
+                if JarUnitFramesDB.totShowBuffs then UpdateTargetTargetBuffs() end
+                if JarUnitFramesDB.totShowDebuffs then UpdateTargetTargetDebuffs() end
+            else
+                targetTargetFrame:Show()
+            end
+        else
+            if targetTargetFrame then
+                targetTargetFrame:Hide()
+            end
+        end
+    end)
+    frame.showToTCheck = showToTCheck
+    
+    -- ToT Show Buffs checkbox (indented, right side)
+    local totShowBuffsCheck = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
+    totShowBuffsCheck:SetPoint("TOPRIGHT", showToTCheck, "BOTTOMRIGHT", -20, -5)
+    totShowBuffsCheck.text = totShowBuffsCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    totShowBuffsCheck.text:SetPoint("RIGHT", totShowBuffsCheck, "LEFT", -5, 0)
+    totShowBuffsCheck.text:SetText("Show ToT Buffs")
+    totShowBuffsCheck:SetChecked(JarUnitFramesDB.totShowBuffs)
+    totShowBuffsCheck:SetScript("OnClick", function(self)
+        JarUnitFramesDB.totShowBuffs = self:GetChecked()
+        if targetTargetFrame and targetTargetFrame.buffs then
+            if JarUnitFramesDB.totShowBuffs then
+                UpdateTargetTargetBuffs()
+            else
+                for i = 1, 20 do
+                    targetTargetFrame.buffs[i]:Hide()
+                end
+            end
+        end
+    end)
+    frame.totShowBuffsCheck = totShowBuffsCheck
+    
+    -- ToT Show Debuffs checkbox (indented, right side)
+    local totShowDebuffsCheck = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
+    totShowDebuffsCheck:SetPoint("TOPRIGHT", totShowBuffsCheck, "BOTTOMRIGHT", 0, -5)
+    totShowDebuffsCheck.text = totShowDebuffsCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    totShowDebuffsCheck.text:SetPoint("RIGHT", totShowDebuffsCheck, "LEFT", -5, 0)
+    totShowDebuffsCheck.text:SetText("Show ToT Debuffs")
+    totShowDebuffsCheck:SetChecked(JarUnitFramesDB.totShowDebuffs)
+    totShowDebuffsCheck:SetScript("OnClick", function(self)
+        JarUnitFramesDB.totShowDebuffs = self:GetChecked()
+        if targetTargetFrame and targetTargetFrame.debuffs then
+            if JarUnitFramesDB.totShowDebuffs then
+                UpdateTargetTargetDebuffs()
+            else
+                for i = 1, 20 do
+                    targetTargetFrame.debuffs[i]:Hide()
+                end
+            end
+        end
+    end)
+    frame.totShowDebuffsCheck = totShowDebuffsCheck
+    
+    -- ToT Width slider (right side)
+    local totWidthSlider = CreateFrame("Slider", nil, frame, "OptionsSliderTemplate")
+    totWidthSlider:SetPoint("TOPRIGHT", totShowDebuffsCheck, "BOTTOMRIGHT", 20, -15)
+    totWidthSlider:SetMinMaxValues(100, 250)
+    totWidthSlider:SetValue(JarUnitFramesDB.totWidth or 150)
+    totWidthSlider:SetValueStep(10)
+    totWidthSlider:SetObeyStepOnDrag(true)
+    totWidthSlider:SetWidth(200)
+    totWidthSlider.Text = totWidthSlider:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    totWidthSlider.Text:SetPoint("BOTTOM", totWidthSlider, "TOP", 0, 5)
+    totWidthSlider.Text:SetText("ToT Width: " .. (JarUnitFramesDB.totWidth or 150))
+    totWidthSlider:SetScript("OnValueChanged", function(self, value)
+        value = math.floor(value / 10 + 0.5) * 10
+        JarUnitFramesDB.totWidth = value
+        self.Text:SetText("ToT Width: " .. value)
+        if targetTargetFrame then
+            targetTargetFrame:SetWidth(value)
+            targetTargetFrame.healthBar:SetWidth(value)
+            targetTargetFrame.powerBar:SetWidth(value)
+            if targetTargetFrame.buffContainer then
+                targetTargetFrame.buffContainer:SetWidth(value)
+            end
+            if targetTargetFrame.debuffContainer then
+                targetTargetFrame.debuffContainer:SetWidth(value)
+            end
+        end
+    end)
+    frame.totWidthSlider = totWidthSlider
+    
+    -- Show Pet Frame checkbox (right side)
+    local showPetCheck = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
+    showPetCheck:SetPoint("TOPRIGHT", totWidthSlider, "BOTTOMRIGHT", 0, -25)
+    showPetCheck.text = showPetCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    showPetCheck.text:SetPoint("RIGHT", showPetCheck, "LEFT", -5, 0)
+    showPetCheck.text:SetText("Show Pet Frame")
+    showPetCheck:SetChecked(JarUnitFramesDB.showPetFrame)
+    showPetCheck:SetScript("OnClick", function(self)
+        JarUnitFramesDB.showPetFrame = self:GetChecked()
+        if JarUnitFramesDB.showPetFrame then
+            if not petFrame then
+                petFrame = CreatePetFrame()
+                UpdatePetFrame()
+                if JarUnitFramesDB.petShowBuffs then UpdatePetBuffs() end
+                if JarUnitFramesDB.petShowDebuffs then UpdatePetDebuffs() end
+            else
+                petFrame:Show()
+            end
+        else
+            if petFrame then
+                petFrame:Hide()
+            end
+        end
+    end)
+    frame.showPetCheck = showPetCheck
+    
+    -- Pet Show Buffs checkbox (indented, right side)
+    local petShowBuffsCheck = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
+    petShowBuffsCheck:SetPoint("TOPRIGHT", showPetCheck, "BOTTOMRIGHT", -20, -5)
+    petShowBuffsCheck.text = petShowBuffsCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    petShowBuffsCheck.text:SetPoint("RIGHT", petShowBuffsCheck, "LEFT", -5, 0)
+    petShowBuffsCheck.text:SetText("Show Pet Buffs")
+    petShowBuffsCheck:SetChecked(JarUnitFramesDB.petShowBuffs)
+    petShowBuffsCheck:SetScript("OnClick", function(self)
+        JarUnitFramesDB.petShowBuffs = self:GetChecked()
+        if petFrame and petFrame.buffs then
+            if JarUnitFramesDB.petShowBuffs then
+                UpdatePetBuffs()
+            else
+                for i = 1, 20 do
+                    petFrame.buffs[i]:Hide()
+                end
+            end
+        end
+    end)
+    frame.petShowBuffsCheck = petShowBuffsCheck
+    
+    -- Pet Show Debuffs checkbox (indented, right side)
+    local petShowDebuffsCheck = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
+    petShowDebuffsCheck:SetPoint("TOPRIGHT", petShowBuffsCheck, "BOTTOMRIGHT", 0, -5)
+    petShowDebuffsCheck.text = petShowDebuffsCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    petShowDebuffsCheck.text:SetPoint("RIGHT", petShowDebuffsCheck, "LEFT", -5, 0)
+    petShowDebuffsCheck.text:SetText("Show Pet Debuffs")
+    petShowDebuffsCheck:SetChecked(JarUnitFramesDB.petShowDebuffs)
+    petShowDebuffsCheck:SetScript("OnClick", function(self)
+        JarUnitFramesDB.petShowDebuffs = self:GetChecked()
+        if petFrame and petFrame.debuffs then
+            if JarUnitFramesDB.petShowDebuffs then
+                UpdatePetDebuffs()
+            else
+                for i = 1, 20 do
+                    petFrame.debuffs[i]:Hide()
+                end
+            end
+        end
+    end)
+    frame.petShowDebuffsCheck = petShowDebuffsCheck
+    
+    -- Pet Width slider (right side)
+    local petWidthSlider = CreateFrame("Slider", nil, frame, "OptionsSliderTemplate")
+    petWidthSlider:SetPoint("TOPRIGHT", petShowDebuffsCheck, "BOTTOMRIGHT", 20, -15)
+    petWidthSlider:SetMinMaxValues(100, 250)
+    petWidthSlider:SetValue(JarUnitFramesDB.petWidth or 150)
+    petWidthSlider:SetValueStep(10)
+    petWidthSlider:SetObeyStepOnDrag(true)
+    petWidthSlider:SetWidth(200)
+    petWidthSlider.Text = petWidthSlider:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    petWidthSlider.Text:SetPoint("BOTTOM", petWidthSlider, "TOP", 0, 5)
+    petWidthSlider.Text:SetText("Pet Width: " .. (JarUnitFramesDB.petWidth or 150))
+    petWidthSlider:SetScript("OnValueChanged", function(self, value)
+        value = math.floor(value / 10 + 0.5) * 10
+        JarUnitFramesDB.petWidth = value
+        self.Text:SetText("Pet Width: " .. value)
+        if petFrame then
+            petFrame:SetWidth(value)
+            petFrame.healthBar:SetWidth(value)
+            petFrame.powerBar:SetWidth(value)
+            if petFrame.buffContainer then
+                petFrame.buffContainer:SetWidth(value)
+            end
+            if petFrame.debuffContainer then
+                petFrame.debuffContainer:SetWidth(value)
+            end
+        end
+    end)
+    frame.petWidthSlider = petWidthSlider
+    
     -- Background transparency slider
     local bgAlphaSlider = CreateFrame("Slider", nil, frame, "OptionsSliderTemplate")
-    bgAlphaSlider:SetPoint("TOPLEFT", 20, -180)
+    bgAlphaSlider:SetPoint("TOPLEFT", scaleSlider, "BOTTOMLEFT", 0, -50)
     bgAlphaSlider:SetMinMaxValues(0.0, 1.0)
     bgAlphaSlider:SetValueStep(0.05)
     bgAlphaSlider:SetObeyStepOnDrag(true)
@@ -1116,16 +2455,25 @@ local function CreateConfigFrame()
         if targetFrame then
             targetFrame.shadow:SetColorTexture(0, 0, 0, value)
         end
+        if focusFrame then
+            focusFrame.shadow:SetColorTexture(0, 0, 0, value)
+        end
+        if targetTargetFrame then
+            targetTargetFrame.shadow:SetColorTexture(0, 0, 0, value)
+        end
+        if petFrame then
+            petFrame.shadow:SetColorTexture(0, 0, 0, value)
+        end
     end)
     frame.bgAlphaSlider = bgAlphaSlider
     
     -- Texture selection dropdown
     local textureLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    textureLabel:SetPoint("TOPLEFT", 20, -235)
+    textureLabel:SetPoint("TOPLEFT", bgAlphaSlider, "BOTTOMLEFT", 0, -30)
     textureLabel:SetText("Bar Texture:")
     
     local textureDropdown = CreateFrame("Frame", "JUF_TextureDropdown", frame, "UIDropDownMenuTemplate")
-    textureDropdown:SetPoint("TOPLEFT", 10, -250)
+    textureDropdown:SetPoint("TOPLEFT", textureLabel, "BOTTOMLEFT", -10, -5)
     
     -- Get current texture name
     local function GetCurrentTextureName()
@@ -1164,14 +2512,15 @@ local function CreateConfigFrame()
             UIDropDownMenu_AddButton(info)
         end
     end)
+    frame.textureDropdown = textureDropdown
     
     -- Font selection dropdown
     local fontLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    fontLabel:SetPoint("TOPLEFT", 20, -295)
+    fontLabel:SetPoint("TOPLEFT", textureLabel, "BOTTOMLEFT", 0, -45)
     fontLabel:SetText("Font:")
     
     local fontDropdown = CreateFrame("Frame", "JUF_FontDropdown", frame, "UIDropDownMenuTemplate")
-    fontDropdown:SetPoint("TOPLEFT", 10, -310)
+    fontDropdown:SetPoint("TOPLEFT", fontLabel, "BOTTOMLEFT", -10, -5)
     
     -- Get current font name
     local function GetCurrentFontName()
@@ -1265,9 +2614,26 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
         TargetFrame:UnregisterAllEvents()
         TargetFrame.Show = function() end  -- Prevent it from showing again
         
+        FocusFrame:Hide()
+        FocusFrame:UnregisterAllEvents()
+        FocusFrame.Show = function() end  -- Prevent it from showing again
+        
+        PetFrame:Hide()
+        PetFrame:UnregisterAllEvents()
+        PetFrame.Show = function() end  -- Prevent it from showing again
+        
         -- Create frames
         playerFrame = CreatePlayerFrame()
         targetFrame = CreateTargetFrame()
+        if JarUnitFramesDB.showFocusFrame then
+            focusFrame = CreateFocusFrame()
+        end
+        if JarUnitFramesDB.showTargetTargetFrame then
+            targetTargetFrame = CreateTargetTargetFrame()
+        end
+        if JarUnitFramesDB.showPetFrame then
+            petFrame = CreatePetFrame()
+        end
         
         -- Create config window
         local success, result = pcall(CreateConfigFrame)
@@ -1286,15 +2652,65 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
         -- Initial update
         UpdatePlayerFrame()
         UpdatePlayerBuffs()
+        UpdatePlayerDebuffs()
         UpdateTargetFrame()
         UpdateTargetBuffs()
+        UpdateTargetDebuffs()
+        if focusFrame then
+            UpdateFocusFrame()
+            UpdateFocusBuffs()
+            UpdateFocusDebuffs()
+        end
+        if targetTargetFrame then
+            UpdateTargetTargetFrame()
+            if JarUnitFramesDB.totShowBuffs then
+                UpdateTargetTargetBuffs()
+            end
+            if JarUnitFramesDB.totShowDebuffs then
+                UpdateTargetTargetDebuffs()
+            end
+        end
+        if petFrame then
+            UpdatePetFrame()
+            if JarUnitFramesDB.petShowBuffs then
+                UpdatePetBuffs()
+            end
+            if JarUnitFramesDB.petShowDebuffs then
+                UpdatePetDebuffs()
+            end
+        end
     
     elseif event == "PLAYER_ENTERING_WORLD" then
         -- Initial full update
         UpdatePlayerFrame()
         UpdatePlayerBuffs()
+        UpdatePlayerDebuffs()
         UpdateTargetFrame()
         UpdateTargetBuffs()
+        UpdateTargetDebuffs()
+        if focusFrame then
+            UpdateFocusFrame()
+            UpdateFocusBuffs()
+            UpdateFocusDebuffs()
+        end
+        if targetTargetFrame then
+            UpdateTargetTargetFrame()
+            if JarUnitFramesDB.totShowBuffs then
+                UpdateTargetTargetBuffs()
+            end
+            if JarUnitFramesDB.totShowDebuffs then
+                UpdateTargetTargetDebuffs()
+            end
+        end
+        if petFrame then
+            UpdatePetFrame()
+            if JarUnitFramesDB.petShowBuffs then
+                UpdatePetBuffs()
+            end
+            if JarUnitFramesDB.petShowDebuffs then
+                UpdatePetDebuffs()
+            end
+        end
         
     elseif event == "PLAYER_TARGET_CHANGED" then
         -- Target changed, but frame events will handle the details
@@ -1328,6 +2744,15 @@ SlashCmdList["JARUNITFRAMES"] = function(msg)
         if targetFrame then
             targetFrame:SetShown(JarUnitFramesDB.showTargetFrame)
         end
+        if focusFrame then
+            focusFrame:SetShown(JarUnitFramesDB.showFocusFrame)
+        end
+        if targetTargetFrame then
+            targetTargetFrame:SetShown(JarUnitFramesDB.showTargetTargetFrame)
+        end
+        if petFrame then
+            petFrame:SetShown(JarUnitFramesDB.showPetFrame)
+        end
         
         print("|cff00ff00Jar's Unit Frames|r " .. (JarUnitFramesDB.showPlayerFrame and "shown" or "hidden"))
         
@@ -1344,6 +2769,15 @@ SlashCmdList["JARUNITFRAMES"] = function(msg)
             if targetFrame then
                 targetFrame:SetScale(scale)
             end
+            if focusFrame then
+                focusFrame:SetScale(scale)
+            end
+            if targetTargetFrame then
+                targetTargetFrame:SetScale(scale)
+            end
+            if petFrame then
+                petFrame:SetScale(scale)
+            end
             print("|cff00ff00Jar's Unit Frames|r scale set to " .. scale)
         else
             print("|cffff0000Error:|r Scale must be between 0.5 and 3.0")
@@ -1354,6 +2788,15 @@ SlashCmdList["JARUNITFRAMES"] = function(msg)
         print("|cff00ff00Jar's Unit Frames|r percentages " .. (JarUnitFramesDB.showPercentages and "shown" or "hidden"))
         UpdatePlayerFrame()
         UpdateTargetFrame()
+        if focusFrame then
+            UpdateFocusFrame()
+        end
+        if targetTargetFrame then
+            UpdateTargetTargetFrame()
+        end
+        if petFrame then
+            UpdatePetFrame()
+        end
         
     elseif msg == "buffs" then
         -- List all current player buffs with their spell IDs
