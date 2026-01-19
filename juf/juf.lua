@@ -370,9 +370,11 @@ local function CreatePlayerFrame()
         buff:EnableMouse(true)
         buff:SetScript("OnEnter", function(self)
             if self.auraInstanceID then
-                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                GameTooltip:SetUnitBuffByAuraInstanceID("player", self.auraInstanceID)
-                GameTooltip:Show()
+                pcall(function()
+                    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                    GameTooltip:SetUnitBuffByAuraInstanceID("player", self.auraInstanceID)
+                    GameTooltip:Show()
+                end)
             end
         end)
         buff:SetScript("OnLeave", function(self)
@@ -392,7 +394,7 @@ local function CreatePlayerFrame()
         -- Calculate position: 10 per row, growing downward
         local row = math.floor((i - 1) / 10)
         local col = (i - 1) % 10
-        debuff:SetPoint("TOPLEFT", frame.healthBar, "BOTTOMLEFT", col * 22, -2 - (row * 22))
+        debuff:SetPoint("TOPLEFT", frame.healthBar, "BOTTOMLEFT", col * 22, -35 - (row * 22))
         
         debuff.icon = debuff:CreateTexture(nil, "ARTWORK")
         debuff.icon:SetAllPoints()
@@ -410,9 +412,11 @@ local function CreatePlayerFrame()
         debuff:EnableMouse(true)
         debuff:SetScript("OnEnter", function(self)
             if self.auraInstanceID then
-                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                GameTooltip:SetUnitDebuffByAuraInstanceID("player", self.auraInstanceID)
-                GameTooltip:Show()
+                pcall(function()
+                    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                    GameTooltip:SetUnitDebuffByAuraInstanceID("player", self.auraInstanceID)
+                    GameTooltip:Show()
+                end)
             end
         end)
         debuff:SetScript("OnLeave", function(self)
@@ -473,11 +477,6 @@ local function CreateTargetFrame()
             UpdateTargetFrame()
             UpdateTargetBuffs()
             UpdateTargetDebuffs()
-            -- Swap buff/debuff positions based on target hostility
-            if UnitExists("target") then
-                local isEnemy = UnitCanAttack("player", "target")
-                SwapBuffDebuffPositions(isEnemy)
-            end
         end
     end)
     
@@ -620,9 +619,11 @@ local function CreateTargetFrame()
         buff:EnableMouse(true)
         buff:SetScript("OnEnter", function(self)
             if self.auraInstanceID then
-                GameTooltip:SetOwner(self, "ANCHOR_LEFT")
-                GameTooltip:SetUnitBuffByAuraInstanceID("target", self.auraInstanceID)
-                GameTooltip:Show()
+                pcall(function()
+                    GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+                    GameTooltip:SetUnitBuffByAuraInstanceID("target", self.auraInstanceID)
+                    GameTooltip:Show()
+                end)
             end
         end)
         buff:SetScript("OnLeave", function(self)
@@ -642,7 +643,7 @@ local function CreateTargetFrame()
         -- Calculate position: 10 per row, growing downward and right to left
         local row = math.floor((i - 1) / 10)
         local col = (i - 1) % 10
-        debuff:SetPoint("TOPRIGHT", frame.healthBar, "BOTTOMRIGHT", -col * 22, -2 - (row * 22))
+        debuff:SetPoint("TOPRIGHT", frame.healthBar, "BOTTOMRIGHT", -col * 22, -35 - (row * 22))
         
         debuff.icon = debuff:CreateTexture(nil, "ARTWORK")
         debuff.icon:SetAllPoints()
@@ -660,9 +661,11 @@ local function CreateTargetFrame()
         debuff:EnableMouse(true)
         debuff:SetScript("OnEnter", function(self)
             if self.auraInstanceID then
-                GameTooltip:SetOwner(self, "ANCHOR_LEFT")
-                GameTooltip:SetUnitDebuffByAuraInstanceID("target", self.auraInstanceID)
-                GameTooltip:Show()
+                pcall(function()
+                    GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+                    GameTooltip:SetUnitDebuffByAuraInstanceID("target", self.auraInstanceID)
+                    GameTooltip:Show()
+                end)
             end
         end)
         debuff:SetScript("OnLeave", function(self)
@@ -682,7 +685,7 @@ function UpdatePlayerBuffs()
     if not playerFrame or not playerFrame.buffs then return end
     
     -- Use GetUnitAuras for more efficient batch retrieval
-    local auras = C_UnitAuras.GetUnitAuras("player", "HELPFUL", 40, nil, nil)
+    local auras = C_UnitAuras.GetUnitAuras("player", "HELPFUL", 40) or {}
     local buffIndex = 1
     
     for _, auraData in ipairs(auras) do
@@ -718,8 +721,8 @@ end
 function UpdateTargetBuffs()
     if not targetFrame or not targetFrame.buffs then return end
     
-    -- Hide all buffs if no target or target is not friendly
-    if not UnitExists("target") or not UnitIsFriend("player", "target") then
+    -- Hide all buffs if no target
+    if not UnitExists("target") then
         for i = 1, 40 do
             targetFrame.buffs[i]:Hide()
         end
@@ -727,7 +730,7 @@ function UpdateTargetBuffs()
     end
     
     -- Use GetUnitAuras for more efficient batch retrieval
-    local auras = C_UnitAuras.GetUnitAuras("target", "HELPFUL", 40, nil, nil)
+    local auras = C_UnitAuras.GetUnitAuras("target", "HELPFUL", 40) or {}
     local buffIndex = 1
     
     for _, auraData in ipairs(auras) do
@@ -759,33 +762,6 @@ function UpdateTargetBuffs()
     end
 end
 
--- Swap buff and debuff positions for enemy targets
-function SwapBuffDebuffPositions(isEnemy)
-    if not targetFrame or not targetFrame.buffs or not targetFrame.debuffs then return end
-    
-    for i = 1, 40 do
-        local buff = targetFrame.buffs[i]
-        local debuff = targetFrame.debuffs[i]
-        
-        local row = math.floor((i - 1) / 10)
-        local col = (i - 1) % 10
-        
-        if isEnemy then
-            -- Swap: debuffs go to top (where buffs were), buffs go to bottom
-            -- Debuffs: BOTTOMRIGHT, TOPRIGHT pointing, grow UP
-            debuff:SetPoint("BOTTOMRIGHT", targetFrame.healthBar, "TOPRIGHT", -col * 22, 2 + (row * 22))
-            -- Buffs: TOPRIGHT, BOTTOMRIGHT pointing, grow DOWN
-            buff:SetPoint("TOPRIGHT", targetFrame.healthBar, "BOTTOMRIGHT", -col * 22, -2 - (row * 22))
-        else
-            -- Normal: buffs at top, debuffs at bottom
-            -- Buffs: BOTTOMRIGHT, TOPRIGHT pointing, grow UP
-            buff:SetPoint("BOTTOMRIGHT", targetFrame.healthBar, "TOPRIGHT", -col * 22, 2 + (row * 22))
-            -- Debuffs: TOPRIGHT, BOTTOMRIGHT pointing, grow DOWN
-            debuff:SetPoint("TOPRIGHT", targetFrame.healthBar, "BOTTOMRIGHT", -col * 22, -2 - (row * 22))
-        end
-    end
-end
-
 -- Update player debuffs
 function UpdatePlayerDebuffs()
     if not playerFrame or not playerFrame.debuffs then return end
@@ -801,12 +777,8 @@ function UpdatePlayerDebuffs()
         debuff.icon:SetTexture(auraData.icon)
         debuff.auraInstanceID = auraData.auraInstanceID
         
-        -- Show stack count if applicable
-        if auraData.applications and auraData.applications > 1 then
-            debuff.count:SetText(auraData.applications)
-        else
-            debuff.count:SetText("")
-        end
+        -- Don't show count (matches Blizzard default behavior)
+        debuff.count:SetText("")
         
         debuff:Show()
         debuffIndex = debuffIndex + 1
@@ -841,12 +813,8 @@ function UpdateTargetDebuffs()
         debuff.icon:SetTexture(auraData.icon)
         debuff.auraInstanceID = auraData.auraInstanceID
         
-        -- Show stack count if applicable
-        if auraData.applications and auraData.applications > 1 then
-            debuff.count:SetText(auraData.applications)
-        else
-            debuff.count:SetText("")
-        end
+        -- Don't show count (matches Blizzard default behavior)
+        debuff.count:SetText("")
         
         debuff:Show()
         debuffIndex = debuffIndex + 1
