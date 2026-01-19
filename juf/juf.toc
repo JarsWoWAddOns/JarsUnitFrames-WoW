@@ -1,0 +1,9 @@
+## Interface: 120001
+## Title: Jar's Unit Frames
+## Notes: Custom unit frames by Jar for WoW 12.0.1
+## Author: Jar
+## Version: 1.0
+## SavedVariables: JarUnitFramesDB
+## OptionalDeps: LibSharedMedia-3.0, SharedMediaAdditionalFonts
+
+juf.lua
