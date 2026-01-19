@@ -1835,6 +1835,12 @@ end
 function UpdateTargetTargetFrame()
     if not targetTargetFrame then return end
     
+    -- Check if the frame is disabled in settings
+    if not JarUnitFramesDB.showTargetTargetFrame then
+        targetTargetFrame:Hide()
+        return
+    end
+    
     -- Check if we have a targettarget
     if not UnitExists("targettarget") then
         targetTargetFrame:Hide()
@@ -2255,10 +2261,18 @@ local function CreateConfigFrame()
                 if JarUnitFramesDB.totShowBuffs then UpdateTargetTargetBuffs() end
                 if JarUnitFramesDB.totShowDebuffs then UpdateTargetTargetDebuffs() end
             else
+                -- Re-enable unit watch
+                if not InCombatLockdown() then
+                    RegisterUnitWatch(targetTargetFrame)
+                end
                 targetTargetFrame:Show()
             end
         else
             if targetTargetFrame then
+                -- Unregister unit watch to prevent auto-show
+                if not InCombatLockdown() then
+                    UnregisterUnitWatch(targetTargetFrame)
+                end
                 targetTargetFrame:Hide()
             end
         end
