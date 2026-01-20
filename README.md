@@ -26,6 +26,6 @@ This also allows you to auto-mirror the target position. If you select this opti
 
 Simply use `/juf` to bring up the configuration screen:
 
-<img width="732" height="858" alt="image" src="https://github.com/user-attachments/assets/ea2c5a85-eb5d-4129-a0f5-00f88da9d2f4" />
+<img width="733" height="861" alt="image" src="https://github.com/user-attachments/assets/cf47ad7c-d142-4271-98b3-4557e9b80e5d" />
 
 I'll make it look pretty later, I used Claude to hep with the configuration elements so for now I am just making it functional. 
