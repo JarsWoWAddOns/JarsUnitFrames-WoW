@@ -5,6 +5,7 @@ This is a small, no-nonsense unitframe replacement. It includes:
 * Target
 * Target of Target
 * Focus
+* Pet
 
 You can adjust:
 * Overall Scale
@@ -14,6 +15,7 @@ You can adjust:
 You can adjust a custom frame width, buff, and debuff disiplays for:
 * Target of Target
 * Focus
+* Pet
 
 This also allows you to auto-mirror the target position. If you select this option, the target frame will mirror the player's frame position along the X axis. 
 
