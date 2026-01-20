@@ -380,6 +380,14 @@ local function CreatePlayerFrame()
         buff.count = buff:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
         buff.count:SetPoint("BOTTOMRIGHT", 2, 0)
         
+        -- Add cooldown frame for duration spiral
+        buff.cooldown = CreateFrame("Cooldown", nil, buff, "CooldownFrameTemplate")
+        buff.cooldown:SetAllPoints()
+        buff.cooldown:SetDrawEdge(false)
+        buff.cooldown:SetDrawSwipe(true)
+        buff.cooldown:SetReverse(true)
+        buff.cooldown:SetHideCountdownNumbers(true)
+        
         -- Enable mouse interaction for tooltips
         buff:EnableMouse(true)
         buff:SetScript("OnEnter", function(self)
@@ -421,6 +429,14 @@ local function CreatePlayerFrame()
         
         debuff.count = debuff:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
         debuff.count:SetPoint("BOTTOMRIGHT", 2, 0)
+        
+        -- Add cooldown frame for duration spiral
+        debuff.cooldown = CreateFrame("Cooldown", nil, debuff, "CooldownFrameTemplate")
+        debuff.cooldown:SetAllPoints()
+        debuff.cooldown:SetDrawEdge(false)
+        debuff.cooldown:SetDrawSwipe(true)
+        debuff.cooldown:SetReverse(true)
+        debuff.cooldown:SetHideCountdownNumbers(true)
         
         -- Enable mouse interaction for tooltips
         debuff:EnableMouse(true)
@@ -629,6 +645,14 @@ local function CreateTargetFrame()
         buff.count = buff:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
         buff.count:SetPoint("BOTTOMRIGHT", 2, 0)
         
+        -- Add cooldown frame for duration spiral
+        buff.cooldown = CreateFrame("Cooldown", nil, buff, "CooldownFrameTemplate")
+        buff.cooldown:SetAllPoints()
+        buff.cooldown:SetDrawEdge(false)
+        buff.cooldown:SetDrawSwipe(true)
+        buff.cooldown:SetReverse(true)
+        buff.cooldown:SetHideCountdownNumbers(true)
+        
         -- Enable mouse interaction for tooltips
         buff:EnableMouse(true)
         buff:SetScript("OnEnter", function(self)
@@ -670,6 +694,14 @@ local function CreateTargetFrame()
         
         debuff.count = debuff:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
         debuff.count:SetPoint("BOTTOMRIGHT", 2, 0)
+        
+        -- Add cooldown frame for duration spiral
+        debuff.cooldown = CreateFrame("Cooldown", nil, debuff, "CooldownFrameTemplate")
+        debuff.cooldown:SetAllPoints()
+        debuff.cooldown:SetDrawEdge(false)
+        debuff.cooldown:SetDrawSwipe(true)
+        debuff.cooldown:SetReverse(true)
+        debuff.cooldown:SetHideCountdownNumbers(true)
         
         -- Enable mouse interaction for tooltips
         debuff:EnableMouse(true)
@@ -859,6 +891,14 @@ function CreateFocusFrame()
         buff.count:SetPoint("BOTTOMRIGHT", 2, 0)
         buff.count:SetFont(font, 10, "OUTLINE")
         
+        -- Add cooldown frame for duration spiral
+        buff.cooldown = CreateFrame("Cooldown", nil, buff, "CooldownFrameTemplate")
+        buff.cooldown:SetAllPoints()
+        buff.cooldown:SetDrawEdge(false)
+        buff.cooldown:SetDrawSwipe(true)
+        buff.cooldown:SetReverse(true)
+        buff.cooldown:SetHideCountdownNumbers(true)
+        
         buff:SetScript("OnEnter", function(self)
             pcall(function()
                 GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
@@ -892,6 +932,14 @@ function CreateFocusFrame()
         debuff.count = debuff:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         debuff.count:SetPoint("BOTTOMRIGHT", 2, 0)
         debuff.count:SetFont(font, 10, "OUTLINE")
+        
+        -- Add cooldown frame for duration spiral
+        debuff.cooldown = CreateFrame("Cooldown", nil, debuff, "CooldownFrameTemplate")
+        debuff.cooldown:SetAllPoints()
+        debuff.cooldown:SetDrawEdge(false)
+        debuff.cooldown:SetDrawSwipe(true)
+        debuff.cooldown:SetReverse(true)
+        debuff.cooldown:SetHideCountdownNumbers(true)
         
         debuff:SetScript("OnEnter", function(self)
             pcall(function()
@@ -1285,6 +1333,14 @@ function CreatePetFrame()
         buff.count:SetPoint("BOTTOMRIGHT", 2, 0)
         buff.count:SetFont(font, 10, "OUTLINE")
         
+        -- Add cooldown frame for duration spiral
+        buff.cooldown = CreateFrame("Cooldown", nil, buff, "CooldownFrameTemplate")
+        buff.cooldown:SetAllPoints()
+        buff.cooldown:SetDrawEdge(false)
+        buff.cooldown:SetDrawSwipe(true)
+        buff.cooldown:SetReverse(true)
+        buff.cooldown:SetHideCountdownNumbers(true)
+        
         buff:SetScript("OnEnter", function(self)
             pcall(function()
                 GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
@@ -1318,6 +1374,14 @@ function CreatePetFrame()
         debuff.count = debuff:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         debuff.count:SetPoint("BOTTOMRIGHT", 2, 0)
         debuff.count:SetFont(font, 10, "OUTLINE")
+        
+        -- Add cooldown frame for duration spiral
+        debuff.cooldown = CreateFrame("Cooldown", nil, debuff, "CooldownFrameTemplate")
+        debuff.cooldown:SetAllPoints()
+        debuff.cooldown:SetDrawEdge(false)
+        debuff.cooldown:SetDrawSwipe(true)
+        debuff.cooldown:SetReverse(true)
+        debuff.cooldown:SetHideCountdownNumbers(true)
         
         debuff:SetScript("OnEnter", function(self)
             pcall(function()
@@ -1359,8 +1423,19 @@ function UpdatePlayerBuffs()
             buff.icon:SetTexture(auraData.icon)
             buff.auraInstanceID = auraData.auraInstanceID
             
-            -- Don't show count (matches Blizzard default behavior)
-            buff.count:SetText("")
+            -- Show stack count (SetText handles secret values safely)
+            buff.count:SetText(C_UnitAuras.GetAuraApplicationDisplayCount("player", auraData.auraInstanceID, 2, 99))
+            
+            -- Update cooldown spiral
+            if buff.cooldown and auraData.duration and auraData.expirationTime then
+                if C_StringUtil.TruncateWhenZero(auraData.duration) then
+                    buff.cooldown:SetCooldown(auraData.duration, auraData.expirationTime)
+                    buff.cooldown:SetCooldownFromExpirationTime(auraData.expirationTime, auraData.duration)
+                    buff.cooldown:Show()
+                else
+                    buff.cooldown:Hide()
+                end
+            end
             
             buff:Show()
             buffIndex = buffIndex + 1
@@ -1404,8 +1479,19 @@ function UpdateTargetBuffs()
             buff.icon:SetTexture(auraData.icon)
             buff.auraInstanceID = auraData.auraInstanceID
             
-            -- Don't show count (matches Blizzard default behavior)
-            buff.count:SetText("")
+            -- Show stack count (SetText handles secret values safely)
+            buff.count:SetText(C_UnitAuras.GetAuraApplicationDisplayCount("target", auraData.auraInstanceID, 2, 99))
+            
+            -- Update cooldown spiral
+            if buff.cooldown and auraData.duration and auraData.expirationTime then
+                if C_StringUtil.TruncateWhenZero(auraData.duration) then
+                    buff.cooldown:SetCooldown(auraData.duration, auraData.expirationTime)
+                    buff.cooldown:SetCooldownFromExpirationTime(auraData.expirationTime, auraData.duration)
+                    buff.cooldown:Show()
+                else
+                    buff.cooldown:Hide()
+                end
+            end
             
             buff:Show()
             buffIndex = buffIndex + 1
@@ -1433,8 +1519,19 @@ function UpdatePlayerDebuffs()
         debuff.icon:SetTexture(auraData.icon)
         debuff.auraInstanceID = auraData.auraInstanceID
         
-        -- Don't show count (matches Blizzard default behavior)
-        debuff.count:SetText("")
+        -- Show stack count (SetText handles secret values safely)
+        debuff.count:SetText(C_UnitAuras.GetAuraApplicationDisplayCount("player", auraData.auraInstanceID, 2, 99))
+        
+        -- Update cooldown spiral
+        if debuff.cooldown and auraData.duration and auraData.expirationTime then
+            if C_StringUtil.TruncateWhenZero(auraData.duration) then
+                debuff.cooldown:SetCooldown(auraData.duration, auraData.expirationTime)
+                debuff.cooldown:SetCooldownFromExpirationTime(auraData.expirationTime, auraData.duration)
+                debuff.cooldown:Show()
+            else
+                debuff.cooldown:Hide()
+            end
+        end
         
         debuff:Show()
         debuffIndex = debuffIndex + 1
@@ -1469,8 +1566,19 @@ function UpdateTargetDebuffs()
         debuff.icon:SetTexture(auraData.icon)
         debuff.auraInstanceID = auraData.auraInstanceID
         
-        -- Don't show count (matches Blizzard default behavior)
-        debuff.count:SetText("")
+        -- Show stack count (SetText handles secret values safely)
+        debuff.count:SetText(C_UnitAuras.GetAuraApplicationDisplayCount("target", auraData.auraInstanceID, 2, 99))
+        
+        -- Update cooldown spiral
+        if debuff.cooldown and auraData.duration and auraData.expirationTime then
+            if C_StringUtil.TruncateWhenZero(auraData.duration) then
+                debuff.cooldown:SetCooldown(auraData.duration, auraData.expirationTime)
+                debuff.cooldown:SetCooldownFromExpirationTime(auraData.expirationTime, auraData.duration)
+                debuff.cooldown:Show()
+            else
+                debuff.cooldown:Hide()
+            end
+        end
         
         debuff:Show()
         debuffIndex = debuffIndex + 1
