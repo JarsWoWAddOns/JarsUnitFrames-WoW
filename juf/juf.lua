@@ -36,10 +36,16 @@ local defaults = {
     petShowDebuffs = true,
     hidePlayerPermanentBuffs = false,  -- Hide player buffs without timers
     hideTargetPermanentBuffs = false,  -- Hide target buffs without timers
+    showPartyFrames = true,
+    partyPos = { point = "TOPLEFT", x = 20, y = -300 },
+    partyWidth = 150,
+    partyPadding = 5,
+    partyShowOnlyMyBuffs = true,
 }
 
 -- Frame references
 local playerFrame, targetFrame, petFrame, focusFrame, targetTargetFrame, configFrame
+local partyFrames = {}
 
 -- Lookup table for player's units (used to avoid secret value comparison errors)
 local myUnits = { player = true, pet = true, vehicle = true }
@@ -1400,6 +1406,234 @@ function CreatePetFrame()
     return frame
 end
 
+-- Create party frame (for party1-4)
+function CreatePartyFrame(partyNum)
+    local font = JarUnitFramesDB.font or "Fonts\\FRIZQT__.TTF"
+    local fontSize = JarUnitFramesDB.fontSize or 12
+    local texture = JarUnitFramesDB.texture or "Interface\\TargetingFrame\\UI-StatusBar"
+    local width = JarUnitFramesDB.partyWidth or 150
+    
+    local frame = CreateFrame("Button", "JUF_PartyFrame"..partyNum, UIParent, "SecureUnitButtonTemplate")
+    frame:SetSize(width, 45)
+    frame:SetFrameStrata("MEDIUM")
+    frame:SetFrameLevel(10)
+    frame:SetAttribute("unit", "party"..partyNum)
+    frame:SetAttribute("type1", "target")
+    frame:SetAttribute("type2", "togglemenu")
+    frame:RegisterForClicks("AnyUp")
+    
+    -- Make frame movable when unlocked (use Shift+Drag to avoid conflicts with secure clicks)
+    frame:SetMovable(true)
+    frame:SetClampedToScreen(true)
+    frame:RegisterForDrag("LeftButton")
+    frame:SetScript("OnDragStart", function(self)
+        if JarUnitFramesDB.unlocked and IsShiftKeyDown() then
+            self:StartMoving()
+        end
+    end)
+    frame:SetScript("OnDragStop", function(self)
+        self:StopMovingOrSizing()
+        -- Save position only for first party frame
+        if partyNum == 1 then
+            local point, _, _, x, y = self:GetPoint()
+            JarUnitFramesDB.partyPos = {point = point, x = x, y = y}
+        end
+    end)
+    
+    -- Add visual border when unlocked
+    frame.unlockBorder = frame:CreateTexture(nil, "OVERLAY")
+    frame.unlockBorder:SetAllPoints()
+    frame.unlockBorder:SetColorTexture(0, 1, 0, 0.3)
+    frame.unlockBorder:Hide()
+    
+    -- Register events
+    frame:RegisterEvent("UNIT_HEALTH")
+    frame:RegisterEvent("UNIT_MAXHEALTH")
+    frame:RegisterEvent("UNIT_POWER_UPDATE")
+    frame:RegisterEvent("UNIT_MAXPOWER")
+    frame:RegisterEvent("UNIT_AURA")
+    frame:RegisterEvent("UNIT_NAME_UPDATE")
+    frame:RegisterEvent("GROUP_ROSTER_UPDATE")
+    
+    -- Event handler
+    frame:SetScript("OnEvent", function(self, event, eventUnit)
+        if event == "UNIT_AURA" and eventUnit == "party"..partyNum then
+            UpdatePartyBuffs(partyNum)
+            UpdatePartyDebuffs(partyNum)
+        elseif event == "GROUP_ROSTER_UPDATE" then
+            UpdatePartyFrame(partyNum)
+            UpdatePartyBuffs(partyNum)
+            UpdatePartyDebuffs(partyNum)
+        elseif eventUnit == "party"..partyNum then
+            UpdatePartyFrame(partyNum)
+        end
+    end)
+    
+    if not InCombatLockdown() then
+        RegisterUnitWatch(frame)
+    end
+    
+    -- Drop shadow background
+    frame.shadow = frame:CreateTexture(nil, "BACKGROUND")
+    frame.shadow:SetPoint("TOPLEFT", -3, 3)
+    frame.shadow:SetPoint("BOTTOMRIGHT", 3, -3)
+    frame.shadow:SetColorTexture(0, 0, 0, JarUnitFramesDB.bgAlpha)
+    
+    -- Health bar
+    frame.healthBar = CreateFrame("StatusBar", nil, frame)
+    frame.healthBar:SetSize(width, 20)
+    frame.healthBar:SetPoint("TOP", 0, -7)
+    frame.healthBar:SetStatusBarTexture(texture)
+    frame.healthBar:SetMinMaxValues(0, 100)
+    frame.healthBar:SetValue(100)
+    
+    frame.healthBar.border = CreateFrame("Frame", nil, frame.healthBar, "BackdropTemplate")
+    frame.healthBar.border:SetAllPoints()
+    frame.healthBar.border:SetBackdrop({
+        edgeFile = "Interface\\Buttons\\WHITE8X8",
+        edgeSize = 1,
+    })
+    frame.healthBar.border:SetBackdropBorderColor(0, 0, 0, 1)
+    
+    frame.healthBar.bg = frame.healthBar:CreateTexture(nil, "BACKGROUND")
+    frame.healthBar.bg:SetAllPoints(frame.healthBar)
+    frame.healthBar.bg:SetTexture(texture)
+    frame.healthBar.bg:SetVertexColor(0, 0.4, 0)
+    frame.healthBar.bg:SetAlpha(JarUnitFramesDB.bgAlpha)
+    
+    -- Health text
+    frame.healthText = frame.healthBar:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    frame.healthText:SetPoint("RIGHT", frame.healthBar, "RIGHT", -3, 0)
+    frame.healthText:SetFont(font, fontSize, "OUTLINE")
+    frame.healthText:SetJustifyH("RIGHT")
+    frame.healthText:SetText("")
+    
+    -- Power bar
+    frame.powerBar = CreateFrame("StatusBar", nil, frame)
+    frame.powerBar:SetSize(width, 8)
+    frame.powerBar:SetPoint("TOP", frame.healthBar, "BOTTOM", 0, 0)
+    frame.powerBar:SetStatusBarTexture(texture)
+    frame.powerBar:SetStatusBarColor(0, 0.4, 1)
+    frame.powerBar:SetMinMaxValues(0, 100)
+    frame.powerBar:SetValue(0)
+    
+    frame.powerBar.border = CreateFrame("Frame", nil, frame.powerBar, "BackdropTemplate")
+    frame.powerBar.border:SetAllPoints()
+    frame.powerBar.border:SetBackdrop({
+        edgeFile = "Interface\\Buttons\\WHITE8X8",
+        edgeSize = 1,
+    })
+    frame.powerBar.border:SetBackdropBorderColor(0, 0, 0, 1)
+    
+    frame.powerBar.bg = frame.powerBar:CreateTexture(nil, "BACKGROUND")
+    frame.powerBar.bg:SetAllPoints(frame.powerBar)
+    frame.powerBar.bg:SetTexture(texture)
+    frame.powerBar.bg:SetVertexColor(0, 0, 0.4)
+    frame.powerBar.bg:SetAlpha(JarUnitFramesDB.bgAlpha)
+    
+    -- Name text
+    frame.name = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    frame.name:SetPoint("TOPLEFT", frame.powerBar, "BOTTOMLEFT", 0, -2)
+    frame.name:SetText("Party "..partyNum)
+    frame.name:SetJustifyH("LEFT")
+    frame.name:SetFont(font, fontSize, "OUTLINE")
+    
+    -- Buffs container (right side, growing rightward)
+    frame.buffs = {}
+    for i = 1, 15 do
+        local buff = CreateFrame("Frame", nil, frame)
+        buff:SetSize(18, 18)
+        
+        local col = (i - 1) % 5
+        local row = math.floor((i - 1) / 5)
+        buff:SetPoint("BOTTOMLEFT", frame.powerBar, "BOTTOMRIGHT", 2 + col * 20, row * 20)
+        
+        buff.icon = buff:CreateTexture(nil, "ARTWORK")
+        buff.icon:SetAllPoints()
+        buff.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+        
+        buff.border = buff:CreateTexture(nil, "OVERLAY")
+        buff.border:SetAllPoints()
+        buff.border:SetTexture("Interface\\Buttons\\UI-Debuff-Overlays")
+        buff.border:SetTexCoord(0.296875, 0.5703125, 0, 0.515625)
+        
+        buff.count = buff:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        buff.count:SetPoint("BOTTOMRIGHT", 2, 0)
+        buff.count:SetFont(font, 10, "OUTLINE")
+        
+        buff.cooldown = CreateFrame("Cooldown", nil, buff, "CooldownFrameTemplate")
+        buff.cooldown:SetAllPoints()
+        buff.cooldown:SetDrawEdge(false)
+        buff.cooldown:SetDrawSwipe(true)
+        buff.cooldown:SetReverse(true)
+        buff.cooldown:SetHideCountdownNumbers(true)
+        
+        buff:EnableMouse(true)
+        buff:SetScript("OnEnter", function(self)
+            if self.auraInstanceID then
+                pcall(function()
+                    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                    GameTooltip:SetUnitBuffByAuraInstanceID("party"..partyNum, self.auraInstanceID)
+                    GameTooltip:Show()
+                end)
+            end
+        end)
+        buff:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        
+        buff:Hide()
+        frame.buffs[i] = buff
+    end
+    
+    -- Debuffs container (left side, growing leftward)
+    frame.debuffs = {}
+    for i = 1, 15 do
+        local debuff = CreateFrame("Frame", nil, frame)
+        debuff:SetSize(18, 18)
+        
+        local col = (i - 1) % 5
+        local row = math.floor((i - 1) / 5)
+        debuff:SetPoint("BOTTOMRIGHT", frame.powerBar, "BOTTOMLEFT", -2 - col * 20, row * 20)
+        
+        debuff.icon = debuff:CreateTexture(nil, "ARTWORK")
+        debuff.icon:SetAllPoints()
+        debuff.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+        
+        debuff.border = debuff:CreateTexture(nil, "OVERLAY")
+        debuff.border:SetAllPoints()
+        debuff.border:SetTexture("Interface\\Buttons\\UI-Debuff-Overlays")
+        debuff.border:SetTexCoord(0.296875, 0.5703125, 0, 0.515625)
+        
+        debuff.count = debuff:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        debuff.count:SetPoint("BOTTOMRIGHT", 2, 0)
+        debuff.count:SetFont(font, 10, "OUTLINE")
+        
+        debuff.cooldown = CreateFrame("Cooldown", nil, debuff, "CooldownFrameTemplate")
+        debuff.cooldown:SetAllPoints()
+        debuff.cooldown:SetDrawEdge(false)
+        debuff.cooldown:SetDrawSwipe(true)
+        debuff.cooldown:SetReverse(true)
+        debuff.cooldown:SetHideCountdownNumbers(true)
+        
+        debuff:EnableMouse(true)
+        debuff:SetScript("OnEnter", function(self)
+            if self.auraInstanceID then
+                pcall(function()
+                    GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+                    GameTooltip:SetUnitDebuffByAuraInstanceID("party"..partyNum, self.auraInstanceID)
+                    GameTooltip:Show()
+                end)
+            end
+        end)
+        debuff:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        
+        debuff:Hide()
+        frame.debuffs[i] = debuff
+    end
+    
+    frame:Hide()
+    return frame
+end
+
 -- Update player buffs
 function UpdatePlayerBuffs()
     if not playerFrame or not playerFrame.buffs then return end
@@ -2122,6 +2356,249 @@ function UpdatePetFrame()
     petFrame.healthBar.bg:SetVertexColor(0, 0.3, 0)
 end
 
+-- Reposition party frames based on width and padding settings
+function RepositionPartyFrames()
+    if not partyFrames[1] then return end
+    
+    local width = JarUnitFramesDB.partyWidth
+    local padding = JarUnitFramesDB.partyPadding
+    
+    -- Clear all anchor points first
+    for i = 1, 4 do
+        if partyFrames[i] then
+            partyFrames[i]:ClearAllPoints()
+        end
+    end
+    
+    -- Position first frame
+    if JarUnitFramesDB.partyPos then
+        partyFrames[1]:SetPoint(JarUnitFramesDB.partyPos.point or "LEFT", UIParent, JarUnitFramesDB.partyPos.point or "LEFT", JarUnitFramesDB.partyPos.x, JarUnitFramesDB.partyPos.y)
+    else
+        partyFrames[1]:SetPoint("LEFT", UIParent, "LEFT", 50, 0)
+    end
+    
+    -- Set width for all frames and position vertically
+    for i = 1, 4 do
+        if partyFrames[i] then
+            local f = partyFrames[i]
+            
+            -- Update frame width
+            f:SetWidth(width)
+            
+            -- Update health bar width
+            if f.healthBar then
+                f.healthBar:SetWidth(width)
+            end
+            
+            -- Update power bar width
+            if f.powerBar then
+                f.powerBar:SetWidth(width)
+            end
+            
+            -- Reanchor buffs and debuffs (they're positioned relative to power bar edges)
+            -- Buffs grow right from power bar right edge
+            if f.buffs then
+                for j = 1, 15 do
+                    if f.buffs[j] then
+                        f.buffs[j]:ClearAllPoints()
+                        local col = (j - 1) % 5
+                        local row = math.floor((j - 1) / 5)
+                        f.buffs[j]:SetPoint("BOTTOMLEFT", f.powerBar, "BOTTOMRIGHT", 2 + col * 20, row * 20)
+                    end
+                end
+            end
+            
+            -- Debuffs grow left from power bar left edge
+            if f.debuffs then
+                for j = 1, 15 do
+                    if f.debuffs[j] then
+                        f.debuffs[j]:ClearAllPoints()
+                        local col = (j - 1) % 5
+                        local row = math.floor((j - 1) / 5)
+                        f.debuffs[j]:SetPoint("BOTTOMRIGHT", f.powerBar, "BOTTOMLEFT", -2 - col * 20, row * 20)
+                    end
+                end
+            end
+            
+            -- Position frames 2-4 below the previous frame with padding
+            if i > 1 then
+                f:SetPoint("TOPLEFT", partyFrames[i-1], "BOTTOMLEFT", 0, -padding)
+            end
+        end
+    end
+end
+
+-- Update party frame
+function UpdatePartyFrame(partyNum)
+    local frame = partyFrames[partyNum]
+    if not frame then return end
+    
+    local unit = "party"..partyNum
+    
+    -- Check if party member exists (RegisterUnitWatch handles show/hide)
+    if not UnitExists(unit) then
+        return
+    end
+    
+    -- Update name
+    local name = UnitName(unit)
+    frame.name:SetText(name or "Unknown")
+    
+    -- Get health values (secret values)
+    local health = UnitHealth(unit)
+    local maxHealth = UnitHealthMax(unit)
+    
+    -- Pass directly to status bar
+    frame.healthBar:SetMinMaxValues(0, maxHealth)
+    frame.healthBar:SetValue(health)
+    
+    -- Show numeric values
+    frame.healthText:SetText(BreakUpLargeNumbers(health))
+    
+    -- Get power values
+    local power = UnitPower(unit)
+    local maxPower = UnitPowerMax(unit)
+    local powerType = UnitPowerType(unit)
+    
+    frame.powerBar:SetMinMaxValues(0, maxPower)
+    frame.powerBar:SetValue(power)
+    
+    -- Color power bar by power type
+    local powerColor = PowerBarColor[powerType]
+    if powerColor then
+        frame.powerBar:SetStatusBarColor(powerColor.r, powerColor.g, powerColor.b)
+        frame.powerBar.bg:SetVertexColor(powerColor.r * 0.3, powerColor.g * 0.3, powerColor.b * 0.3)
+    end
+    
+    -- Color by class if player
+    local colored = false
+    if UnitIsPlayer(unit) then
+        local _, class = UnitClass(unit)
+        if class and RAID_CLASS_COLORS[class] then
+            local classColor = RAID_CLASS_COLORS[class]
+            frame.healthBar:SetStatusBarColor(classColor.r, classColor.g, classColor.b)
+            frame.healthBar:SetStatusBarDesaturated(false)
+            frame.healthBar.bg:SetVertexColor(classColor.r * 0.3, classColor.g * 0.3, classColor.b * 0.3)
+            colored = true
+        end
+    end
+    
+    -- If not colored by class, use reaction or default green
+    if not colored then
+        local reaction = UnitReaction(unit, "player")
+        if reaction and reaction <= 3 then
+            frame.healthBar:SetStatusBarColor(1, 0, 0)
+            frame.healthBar.bg:SetVertexColor(0.3, 0, 0)
+        elseif reaction and reaction >= 5 then
+            frame.healthBar:SetStatusBarColor(0, 1, 0)
+            frame.healthBar.bg:SetVertexColor(0, 0.3, 0)
+        else
+            frame.healthBar:SetStatusBarColor(1, 1, 0)
+            frame.healthBar.bg:SetVertexColor(0.3, 0.3, 0)
+        end
+    end
+end
+
+-- Update party buffs
+function UpdatePartyBuffs(partyNum)
+    local frame = partyFrames[partyNum]
+    if not frame or not frame.buffs then return end
+    
+    local unit = "party"..partyNum
+    
+    -- Hide all buffs if no unit
+    if not UnitExists(unit) then
+        for i = 1, 15 do
+            frame.buffs[i]:Hide()
+        end
+        return
+    end
+    
+    -- Use PLAYER filter if option enabled (like raid frames)
+    local filter = JarUnitFramesDB.partyShowOnlyMyBuffs and "HELPFUL|PLAYER" or "HELPFUL"
+    local auras = C_UnitAuras.GetUnitAuras(unit, filter, 15) or {}
+    local buffIndex = 1
+    
+    for _, auraData in ipairs(auras) do
+        if buffIndex > 15 then break end
+        
+        local buff = frame.buffs[buffIndex]
+        buff.icon:SetTexture(auraData.icon)
+        buff.auraInstanceID = auraData.auraInstanceID
+        
+        -- Show stack count (SetText handles secret values safely)
+        buff.count:SetText(C_UnitAuras.GetAuraApplicationDisplayCount(unit, auraData.auraInstanceID, 2, 99))
+        
+        -- Update cooldown
+        local duration = auraData.duration
+        local expirationTime = auraData.expirationTime
+        
+        if duration and C_StringUtil.TruncateWhenZero(duration) then
+            buff.cooldown:SetCooldown(duration, expirationTime)
+            buff.cooldown:SetCooldownFromExpirationTime(expirationTime, duration)
+        else
+            buff.cooldown:Clear()
+        end
+        
+        buff:Show()
+        buffIndex = buffIndex + 1
+    end
+    
+    -- Hide unused buff frames
+    for i = buffIndex, 15 do
+        frame.buffs[i]:Hide()
+    end
+end
+
+-- Update party debuffs
+function UpdatePartyDebuffs(partyNum)
+    local frame = partyFrames[partyNum]
+    if not frame or not frame.debuffs then return end
+    
+    local unit = "party"..partyNum
+    
+    -- Hide all debuffs if no unit
+    if not UnitExists(unit) then
+        for i = 1, 15 do
+            frame.debuffs[i]:Hide()
+        end
+        return
+    end
+    
+    local auras = C_UnitAuras.GetUnitAuras(unit, "HARMFUL", 15) or {}
+    local debuffIndex = 1
+    
+    for _, auraData in ipairs(auras) do
+        if debuffIndex > 15 then break end
+        
+        local debuff = frame.debuffs[debuffIndex]
+        debuff.icon:SetTexture(auraData.icon)
+        debuff.auraInstanceID = auraData.auraInstanceID
+        
+        -- Show stack count (SetText handles secret values safely)
+        debuff.count:SetText(C_UnitAuras.GetAuraApplicationDisplayCount(unit, auraData.auraInstanceID, 2, 99))
+        
+        -- Update cooldown
+        local duration = auraData.duration
+        local expirationTime = auraData.expirationTime
+        
+        if duration and C_StringUtil.TruncateWhenZero(duration) then
+            debuff.cooldown:SetCooldown(duration, expirationTime)
+            debuff.cooldown:SetCooldownFromExpirationTime(expirationTime, duration)
+        else
+            debuff.cooldown:Clear()
+        end
+        
+        debuff:Show()
+        debuffIndex = debuffIndex + 1
+    end
+    
+    -- Hide unused debuff frames
+    for i = debuffIndex, 15 do
+        frame.debuffs[i]:Hide()
+    end
+end
+
 -- Create config window
 local function CreateConfigFrame()
     local frame = CreateFrame("Frame", "JUF_ConfigFrame", UIParent, "BasicFrameTemplateWithInset")
@@ -2148,9 +2625,21 @@ local function CreateConfigFrame()
     unlockCheck:SetScript("OnClick", function(self)
         JarUnitFramesDB.unlocked = self:GetChecked()
         if JarUnitFramesDB.unlocked then
-            print("|cff00ff00Jar's Unit Frames|r Frames unlocked - drag to reposition")
+            print("|cff00ff00Jar's Unit Frames|r Frames unlocked - Shift+drag party frames to reposition")
+            -- Show unlock borders on party frames
+            for i = 1, 4 do
+                if partyFrames[i] and partyFrames[i].unlockBorder then
+                    partyFrames[i].unlockBorder:Show()
+                end
+            end
         else
             print("|cff00ff00Jar's Unit Frames|r Frames locked")
+            -- Hide unlock borders on party frames
+            for i = 1, 4 do
+                if partyFrames[i] and partyFrames[i].unlockBorder then
+                    partyFrames[i].unlockBorder:Hide()
+                end
+            end
         end
     end)
     frame.unlockCheck = unlockCheck
@@ -2570,7 +3059,7 @@ local function CreateConfigFrame()
         value = math.floor(value * 20 + 0.5) / 20  -- Round to 0.05 increments
         JarUnitFramesDB.bgAlpha = value
         self.Text:SetText("Background Opacity: " .. math.floor(value * 100) .. "%")
-        -- Update drop shadow transparency on both frames
+        -- Update drop shadow transparency on all frames
         if playerFrame then
             playerFrame.shadow:SetColorTexture(0, 0, 0, value)
         end
@@ -2585,6 +3074,12 @@ local function CreateConfigFrame()
         end
         if petFrame then
             petFrame.shadow:SetColorTexture(0, 0, 0, value)
+        end
+        -- Update party frames
+        for i = 1, 4 do
+            if partyFrames[i] and partyFrames[i].shadow then
+                partyFrames[i].shadow:SetColorTexture(0, 0, 0, value)
+            end
         end
     end)
     frame.bgAlphaSlider = bgAlphaSlider
@@ -2682,6 +3177,141 @@ local function CreateConfigFrame()
         end
     end)
     
+    -- Party Frames Section (left side, under font)
+    local partyHeader = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    partyHeader:SetPoint("TOPLEFT", fontLabel, "BOTTOMLEFT", 0, -60)
+    partyHeader:SetText("Party Frames")
+    
+    -- Show Party Frames checkbox
+    local showPartyCheck = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
+    showPartyCheck:SetPoint("TOPLEFT", partyHeader, "BOTTOMLEFT", 0, -10)
+    showPartyCheck.text = showPartyCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    showPartyCheck.text:SetPoint("LEFT", showPartyCheck, "RIGHT", 5, 0)
+    showPartyCheck.text:SetText("Show Party Frames")
+    showPartyCheck:SetChecked(JarUnitFramesDB.showPartyFrames)
+    showPartyCheck:SetScript("OnClick", function(self)
+        JarUnitFramesDB.showPartyFrames = self:GetChecked()
+        if JarUnitFramesDB.showPartyFrames then
+            -- Hide Blizzard party frames
+            if CompactRaidFrameManager then
+                CompactRaidFrameManager:UnregisterAllEvents()
+                CompactRaidFrameManager:Hide()
+            end
+            if CompactPartyFrame then
+                CompactPartyFrame:UnregisterAllEvents()
+                CompactPartyFrame:Hide()
+            end
+            if CompactRaidFrameContainer then
+                CompactRaidFrameContainer:UnregisterAllEvents()
+                CompactRaidFrameContainer:Hide()
+            end
+            
+            -- Create party frames if they don't exist
+            if not partyFrames[1] then
+                for i = 1, 4 do
+                    partyFrames[i] = CreatePartyFrame(i)
+                end
+                RepositionPartyFrames()
+                -- Do initial updates
+                for i = 1, 4 do
+                    UpdatePartyFrame(i)
+                    UpdatePartyBuffs(i)
+                    UpdatePartyDebuffs(i)
+                end
+            else
+                -- Frames exist, just enable them by triggering updates
+                for i = 1, 4 do
+                    if partyFrames[i] and not InCombatLockdown() then
+                        RegisterUnitWatch(partyFrames[i])
+                        UpdatePartyFrame(i)
+                        UpdatePartyBuffs(i)
+                        UpdatePartyDebuffs(i)
+                    end
+                end
+            end
+            print("|cff00ff00Jar's Unit Frames|r Party frames enabled")
+        else
+            -- Unregister unit watch and hide custom party frames
+            for i = 1, 4 do
+                if partyFrames[i] then
+                    if not InCombatLockdown() then
+                        UnregisterUnitWatch(partyFrames[i])
+                    end
+                    partyFrames[i]:Hide()
+                end
+            end
+            -- Re-enable Blizzard party frames
+            if CompactRaidFrameManager then
+                CompactRaidFrameManager_OnLoad(CompactRaidFrameManager)
+                CompactRaidFrameManager:Show()
+            end
+            if CompactPartyFrame then
+                CompactPartyFrame:Show()
+            end
+            if CompactRaidFrameContainer then
+                CompactRaidFrameContainer:Show()
+            end
+            print("|cff00ff00Jar's Unit Frames|r Party frames disabled, Blizzard frames restored")
+        end
+    end)
+    frame.showPartyCheck = showPartyCheck
+    
+    -- Show Only My Buffs checkbox
+    local partyOnlyMyBuffsCheck = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
+    partyOnlyMyBuffsCheck:SetPoint("TOPLEFT", showPartyCheck, "BOTTOMLEFT", 0, -10)
+    partyOnlyMyBuffsCheck.text = partyOnlyMyBuffsCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    partyOnlyMyBuffsCheck.text:SetPoint("LEFT", partyOnlyMyBuffsCheck, "RIGHT", 5, 0)
+    partyOnlyMyBuffsCheck.text:SetText("Show Only My Buffs")
+    partyOnlyMyBuffsCheck:SetChecked(JarUnitFramesDB.partyShowOnlyMyBuffs)
+    partyOnlyMyBuffsCheck:SetScript("OnClick", function(self)
+        JarUnitFramesDB.partyShowOnlyMyBuffs = self:GetChecked()
+        -- Update all party frames to reflect the change
+        if JarUnitFramesDB.showPartyFrames then
+            for i = 1, 4 do
+                UpdatePartyBuffs(i)
+            end
+        end
+    end)
+    frame.partyOnlyMyBuffsCheck = partyOnlyMyBuffsCheck
+    
+    -- Party Width slider
+    local partyWidthSlider = CreateFrame("Slider", nil, frame, "OptionsSliderTemplate")
+    partyWidthSlider:SetPoint("TOPLEFT", partyOnlyMyBuffsCheck, "BOTTOMLEFT", 0, -20)
+    partyWidthSlider:SetMinMaxValues(100, 250)
+    partyWidthSlider:SetValue(JarUnitFramesDB.partyWidth or 150)
+    partyWidthSlider:SetValueStep(10)
+    partyWidthSlider:SetObeyStepOnDrag(true)
+    partyWidthSlider:SetWidth(200)
+    partyWidthSlider.Text = partyWidthSlider:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    partyWidthSlider.Text:SetPoint("BOTTOM", partyWidthSlider, "TOP", 0, 5)
+    partyWidthSlider.Text:SetText("Party Width: " .. (JarUnitFramesDB.partyWidth or 150))
+    partyWidthSlider:SetScript("OnValueChanged", function(self, value)
+        value = math.floor(value / 10 + 0.5) * 10
+        JarUnitFramesDB.partyWidth = value
+        self.Text:SetText("Party Width: " .. value)
+        RepositionPartyFrames()
+    end)
+    frame.partyWidthSlider = partyWidthSlider
+    
+    -- Party Padding slider
+    local partyPaddingSlider = CreateFrame("Slider", nil, frame, "OptionsSliderTemplate")
+    partyPaddingSlider:SetPoint("TOPLEFT", partyWidthSlider, "BOTTOMLEFT", 0, -50)
+    partyPaddingSlider:SetMinMaxValues(0, 20)
+    partyPaddingSlider:SetValue(JarUnitFramesDB.partyPadding or 5)
+    partyPaddingSlider:SetValueStep(1)
+    partyPaddingSlider:SetObeyStepOnDrag(true)
+    partyPaddingSlider:SetWidth(200)
+    partyPaddingSlider.Text = partyPaddingSlider:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    partyPaddingSlider.Text:SetPoint("BOTTOM", partyPaddingSlider, "TOP", 0, 5)
+    partyPaddingSlider.Text:SetText("Party Padding: " .. (JarUnitFramesDB.partyPadding or 5))
+    partyPaddingSlider:SetScript("OnValueChanged", function(self, value)
+        value = math.floor(value + 0.5)
+        JarUnitFramesDB.partyPadding = value
+        self.Text:SetText("Party Padding: " .. value)
+        RepositionPartyFrames()
+    end)
+    frame.partyPaddingSlider = partyPaddingSlider
+    
     -- Close button is already provided by BasicFrameTemplateWithInset
     frame:SetScript("OnHide", function()
         -- Nothing needed
@@ -2712,6 +3342,29 @@ local eventFrame = CreateFrame("Frame")
 eventFrame:RegisterEvent("PLAYER_LOGIN")
 eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 eventFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
+eventFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
+
+-- Hide Blizzard party frames (called on various events to keep them hidden)
+local function HideBlizzardPartyFrames()
+    if not JarUnitFramesDB.showPartyFrames then
+        return  -- Only hide if we're using custom party frames
+    end
+    
+    if CompactRaidFrameManager then
+        CompactRaidFrameManager:UnregisterAllEvents()
+        CompactRaidFrameManager:Hide()
+    end
+    
+    if CompactPartyFrame then
+        CompactPartyFrame:UnregisterAllEvents()
+        CompactPartyFrame:Hide()
+    end
+    
+    if CompactRaidFrameContainer then
+        CompactRaidFrameContainer:UnregisterAllEvents()
+        CompactRaidFrameContainer:Hide()
+    end
+end
 
 eventFrame:SetScript("OnEvent", function(self, event, ...)
     if event == "PLAYER_LOGIN" then
@@ -2744,6 +3397,28 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
         PetFrame:UnregisterAllEvents()
         PetFrame.Show = function() end  -- Prevent it from showing again
         
+        -- Always hide Blizzard party frames and prevent them from showing
+        if CompactRaidFrameManager then
+            CompactRaidFrameManager:UnregisterAllEvents()
+            CompactRaidFrameManager:Hide()
+            CompactRaidFrameManager:SetParent(nil)
+            CompactRaidFrameManager.Show = function() end
+        end
+        
+        if CompactPartyFrame then
+            CompactPartyFrame:UnregisterAllEvents()
+            CompactPartyFrame:Hide()
+            CompactPartyFrame:SetParent(nil)
+            CompactPartyFrame.Show = function() end
+        end
+        
+        if CompactRaidFrameContainer then
+            CompactRaidFrameContainer:UnregisterAllEvents()
+            CompactRaidFrameContainer:Hide()
+            CompactRaidFrameContainer:SetParent(nil)
+            CompactRaidFrameContainer.Show = function() end
+        end
+        
         -- Create frames
         playerFrame = CreatePlayerFrame()
         targetFrame = CreateTargetFrame()
@@ -2755,6 +3430,15 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
         end
         if JarUnitFramesDB.showPetFrame then
             petFrame = CreatePetFrame()
+        end
+        
+        -- Create party frames
+        if JarUnitFramesDB.showPartyFrames then
+            for i = 1, 4 do
+                partyFrames[i] = CreatePartyFrame(i)
+            end
+            -- Position party frames vertically
+            RepositionPartyFrames()
         end
         
         -- Create config window
@@ -2801,8 +3485,22 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
                 UpdatePetDebuffs()
             end
         end
+        
+        -- Update party frames
+        if JarUnitFramesDB.showPartyFrames then
+            for i = 1, 4 do
+                UpdatePartyFrame(i)
+                UpdatePartyBuffs(i)
+                UpdatePartyDebuffs(i)
+            end
+        end
     
     elseif event == "PLAYER_ENTERING_WORLD" then
+        -- Hide Blizzard party frames (may re-show on zone change)
+        if JarUnitFramesDB.showPartyFrames then
+            HideBlizzardPartyFrames()
+        end
+        
         -- Initial full update
         UpdatePlayerFrame()
         UpdatePlayerBuffs()
@@ -2834,17 +3532,36 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
             end
         end
         
+        -- Update party frames
+        if JarUnitFramesDB.showPartyFrames then
+            for i = 1, 4 do
+                UpdatePartyFrame(i)
+                UpdatePartyBuffs(i)
+                UpdatePartyDebuffs(i)
+            end
+        end
+        
     elseif event == "PLAYER_TARGET_CHANGED" then
         -- Target changed, but frame events will handle the details
         -- Just do an initial update
         UpdateTargetFrame()
         UpdateTargetBuffs()
+        
+    elseif event == "GROUP_ROSTER_UPDATE" then
+        -- Party composition changed, update all party frames
+        if JarUnitFramesDB.showPartyFrames then
+            for i = 1, 4 do
+                UpdatePartyFrame(i)
+                UpdatePartyBuffs(i)
+                UpdatePartyDebuffs(i)
+            end
+            -- Hide Blizzard frames (they may re-show when party changes)
+            HideBlizzardPartyFrames()
+        end
     end
 end)
 
--- Slash commands
-SLASH_JARUNITFRAMES1 = "/juf"
-SLASH_JARUNITFRAMES2 = "/JARUNITFRAMES"
+-- SlashRUNITFRAMES2 = "/JARUNITFRAMES"
 SlashCmdList["JARUNITFRAMES"] = function(msg)
     msg = msg:lower():trim()
     
