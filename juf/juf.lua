@@ -3561,7 +3561,9 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
     end
 end)
 
--- SlashRUNITFRAMES2 = "/JARUNITFRAMES"
+-- Slash commands
+SLASH_JARUNITFRAMES1 = "/juf"
+SLASH_JARUNITFRAMES2 = "/jarunitframes"
 SlashCmdList["JARUNITFRAMES"] = function(msg)
     msg = msg:lower():trim()
     
