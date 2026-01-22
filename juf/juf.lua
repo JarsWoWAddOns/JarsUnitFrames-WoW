@@ -176,6 +176,19 @@ local function CreatePlayerFrame()
     frame:SetAttribute("type2", "togglemenu")
     frame:RegisterForClicks("AnyUp")
     
+    -- Proper tooltip handling for SecureUnitButton (prevents taint)
+    frame:SetScript("OnEnter", function(self)
+        local unit = self:GetAttribute("unit")
+        if unit and UnitExists(unit) then
+            GameTooltip_SetDefaultAnchor(GameTooltip, self)
+            GameTooltip:SetUnit(unit)
+            GameTooltip:Show()
+        end
+    end)
+    frame:SetScript("OnLeave", function(self)
+        GameTooltip:Hide()
+    end)
+    
     -- Register basic events
     frame:RegisterEvent("UNIT_HEALTH")
     frame:RegisterEvent("UNIT_MAXHEALTH")
@@ -491,6 +504,19 @@ local function CreateTargetFrame()
     frame:SetAttribute("type2", "togglemenu")
     frame:RegisterForClicks("AnyUp")
     
+    -- Proper tooltip handling for SecureUnitButton (prevents taint)
+    frame:SetScript("OnEnter", function(self)
+        local unit = self:GetAttribute("unit")
+        if unit and UnitExists(unit) then
+            GameTooltip_SetDefaultAnchor(GameTooltip, self)
+            GameTooltip:SetUnit(unit)
+            GameTooltip:Show()
+        end
+    end)
+    frame:SetScript("OnLeave", function(self)
+        GameTooltip:Hide()
+    end)
+    
     -- Register events
     frame:RegisterEvent("UNIT_HEALTH")
     frame:RegisterEvent("UNIT_MAXHEALTH")
@@ -741,6 +767,19 @@ function CreateFocusFrame()
     frame:SetAttribute("*type2", "menu")
     frame:RegisterForClicks("AnyUp")
     
+    -- Proper tooltip handling for SecureUnitButton (prevents taint)
+    frame:SetScript("OnEnter", function(self)
+        local unit = self:GetAttribute("unit")
+        if unit and UnitExists(unit) then
+            GameTooltip_SetDefaultAnchor(GameTooltip, self)
+            GameTooltip:SetUnit(unit)
+            GameTooltip:Show()
+        end
+    end)
+    frame:SetScript("OnLeave", function(self)
+        GameTooltip:Hide()
+    end)
+    
     -- Register events
     frame:RegisterEvent("PLAYER_TARGET_CHANGED")
     frame:RegisterEvent("UNIT_HEALTH")
@@ -974,6 +1013,19 @@ function CreateTargetTargetFrame()
     frame:SetAttribute("*type2", "menu")
     frame:RegisterForClicks("AnyUp")
     
+    -- Proper tooltip handling for SecureUnitButton (prevents taint)
+    frame:SetScript("OnEnter", function(self)
+        local unit = self:GetAttribute("unit")
+        if unit and UnitExists(unit) then
+            GameTooltip_SetDefaultAnchor(GameTooltip, self)
+            GameTooltip:SetUnit(unit)
+            GameTooltip:Show()
+        end
+    end)
+    frame:SetScript("OnLeave", function(self)
+        GameTooltip:Hide()
+    end)
+    
     -- Register events
     frame:RegisterEvent("PLAYER_TARGET_CHANGED")
     frame:RegisterEvent("UNIT_HEALTH")
@@ -1186,6 +1238,19 @@ function CreatePetFrame()
     frame:SetAttribute("*type1", "target")
     frame:SetAttribute("*type2", "menu")
     frame:RegisterForClicks("AnyUp")
+    
+    -- Proper tooltip handling for SecureUnitButton (prevents taint)
+    frame:SetScript("OnEnter", function(self)
+        local unit = self:GetAttribute("unit")
+        if unit and UnitExists(unit) then
+            GameTooltip_SetDefaultAnchor(GameTooltip, self)
+            GameTooltip:SetUnit(unit)
+            GameTooltip:Show()
+        end
+    end)
+    frame:SetScript("OnLeave", function(self)
+        GameTooltip:Hide()
+    end)
     
     -- Register events
     frame:RegisterEvent("UNIT_PET")
@@ -1414,6 +1479,24 @@ function CreatePartyFrame(partyNum)
     local width = JarUnitFramesDB.partyWidth or 150
     
     local frame = CreateFrame("Button", "JUF_PartyFrame"..partyNum, UIParent, "SecureUnitButtonTemplate")
+    frame:SetSize(width, 30)
+    frame:SetAttribute("unit", "party"..partyNum)
+    frame:SetAttribute("*type1", "target")
+    frame:SetAttribute("*type2", "menu")
+    frame:RegisterForClicks("AnyUp")
+    
+    -- Proper tooltip handling for SecureUnitButton (prevents taint)
+    frame:SetScript("OnEnter", function(self)
+        local unit = self:GetAttribute("unit")
+        if unit and UnitExists(unit) then
+            GameTooltip_SetDefaultAnchor(GameTooltip, self)
+            GameTooltip:SetUnit(unit)
+            GameTooltip:Show()
+        end
+    end)
+    frame:SetScript("OnLeave", function(self)
+        GameTooltip:Hide()
+    end)
     frame:SetSize(width, 45)
     frame:SetFrameStrata("MEDIUM")
     frame:SetFrameLevel(10)
