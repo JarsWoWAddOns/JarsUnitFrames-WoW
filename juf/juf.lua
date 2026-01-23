@@ -3463,43 +3463,54 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
         
         print("|cff00ff00Jar's Unit Frames|r loaded. Type /juf for options.")
         
-        -- Hide default Blizzard unit frames
-        PlayerFrame:Hide()
-        PlayerFrame:UnregisterAllEvents()
-        PlayerFrame.Show = function() end  -- Prevent it from showing again
-        
-        TargetFrame:Hide()
-        TargetFrame:UnregisterAllEvents()
-        TargetFrame.Show = function() end  -- Prevent it from showing again
-        
-        FocusFrame:Hide()
-        FocusFrame:UnregisterAllEvents()
-        FocusFrame.Show = function() end  -- Prevent it from showing again
-        
-        PetFrame:Hide()
-        PetFrame:UnregisterAllEvents()
-        PetFrame.Show = function() end  -- Prevent it from showing again
+        -- Hide default Blizzard unit frames properly (without causing taint)
+        -- Use a secure method to hide frames
+        if not InCombatLockdown() then
+            PlayerFrame:UnregisterAllEvents()
+            PlayerFrame:Hide()
+            
+            TargetFrame:UnregisterAllEvents()
+            TargetFrame:Hide()
+            
+            FocusFrame:UnregisterAllEvents()
+            FocusFrame:Hide()
+            
+            PetFrame:UnregisterAllEvents()
+            PetFrame:Hide()
+            
+            -- Hook to keep them hidden (use secure hook)
+            PlayerFrame:HookScript("OnShow", function(self) self:Hide() end)
+            TargetFrame:HookScript("OnShow", function(self) self:Hide() end)
+            FocusFrame:HookScript("OnShow", function(self) self:Hide() end)
+            PetFrame:HookScript("OnShow", function(self) self:Hide() end)
+        end
         
         -- Always hide Blizzard party frames and prevent them from showing
         if CompactRaidFrameManager then
             CompactRaidFrameManager:UnregisterAllEvents()
             CompactRaidFrameManager:Hide()
             CompactRaidFrameManager:SetParent(nil)
-            CompactRaidFrameManager.Show = function() end
+            if not InCombatLockdown() then
+                CompactRaidFrameManager:HookScript("OnShow", function(self) self:Hide() end)
+            end
         end
         
         if CompactPartyFrame then
             CompactPartyFrame:UnregisterAllEvents()
             CompactPartyFrame:Hide()
             CompactPartyFrame:SetParent(nil)
-            CompactPartyFrame.Show = function() end
+            if not InCombatLockdown() then
+                CompactPartyFrame:HookScript("OnShow", function(self) self:Hide() end)
+            end
         end
         
         if CompactRaidFrameContainer then
             CompactRaidFrameContainer:UnregisterAllEvents()
             CompactRaidFrameContainer:Hide()
             CompactRaidFrameContainer:SetParent(nil)
-            CompactRaidFrameContainer.Show = function() end
+            if not InCombatLockdown() then
+                CompactRaidFrameContainer:HookScript("OnShow", function(self) self:Hide() end)
+            end
         end
         
         -- Create frames
