@@ -19,6 +19,7 @@ local defaults = {
     fontSize = 12,
     showLevel = false,
     bgAlpha = 0.8,
+    enableAuraTooltips = false,  -- Disabled by default due to WoW 12.0 secret value restrictions
     mirrorTargetPosition = false,
     playerPos = { point = "TOPLEFT", x = 20, y = -20 },
     targetPos = { point = "TOPLEFT", x = 260, y = -20 },
@@ -407,20 +408,26 @@ local function CreatePlayerFrame()
         buff.cooldown:SetReverse(true)
         buff.cooldown:SetHideCountdownNumbers(true)
         
-        -- Enable mouse interaction for tooltips
-        buff:EnableMouse(true)
-        buff:SetScript("OnEnter", function(self)
-            if self.auraInstanceID then
-                pcall(function()
-                    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                    GameTooltip:SetUnitBuffByAuraInstanceID("player", self.auraInstanceID)
-                    GameTooltip:Show()
-                end)
-            end
-        end)
-        buff:SetScript("OnLeave", function(self)
-            GameTooltip:Hide()
-        end)
+        -- Enable mouse interaction for tooltips (if enabled in config)
+        if JarUnitFramesDB.enableAuraTooltips then
+            buff:EnableMouse(true)
+            buff:SetScript("OnEnter", function(self)
+                if self.auraInstanceID and not GameTooltip:IsForbidden() then
+                    local success = pcall(function()
+                        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                        GameTooltip:SetUnitAuraByAuraInstanceID("player", self.auraInstanceID)
+                        GameTooltip:Show()
+                    end)
+                end
+            end)
+            buff:SetScript("OnLeave", function(self)
+                if not GameTooltip:IsForbidden() then
+                    GameTooltip:Hide()
+                end
+            end)
+        else
+            buff:EnableMouse(false)
+        end
         
         buff:Hide()
         frame.buffs[i] = buff
@@ -685,20 +692,26 @@ local function CreateTargetFrame()
         buff.cooldown:SetReverse(true)
         buff.cooldown:SetHideCountdownNumbers(true)
         
-        -- Enable mouse interaction for tooltips
-        buff:EnableMouse(true)
-        buff:SetScript("OnEnter", function(self)
-            if self.auraInstanceID then
-                pcall(function()
-                    GameTooltip:SetOwner(self, "ANCHOR_LEFT")
-                    GameTooltip:SetUnitBuffByAuraInstanceID("target", self.auraInstanceID)
-                    GameTooltip:Show()
-                end)
-            end
-        end)
-        buff:SetScript("OnLeave", function(self)
-            GameTooltip:Hide()
-        end)
+        -- Enable mouse interaction for tooltips (if enabled in config)
+        if JarUnitFramesDB.enableAuraTooltips then
+            buff:EnableMouse(true)
+            buff:SetScript("OnEnter", function(self)
+                if self.auraInstanceID and not GameTooltip:IsForbidden() then
+                    local success = pcall(function()
+                        GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+                        GameTooltip:SetUnitAuraByAuraInstanceID("target", self.auraInstanceID)
+                        GameTooltip:Show()
+                    end)
+                end
+            end)
+            buff:SetScript("OnLeave", function(self)
+                if not GameTooltip:IsForbidden() then
+                    GameTooltip:Hide()
+                end
+            end)
+        else
+            buff:EnableMouse(false)
+        end
         
         buff:Hide()
         frame.buffs[i] = buff
@@ -944,14 +957,25 @@ function CreateFocusFrame()
         buff.cooldown:SetReverse(true)
         buff.cooldown:SetHideCountdownNumbers(true)
         
-        buff:SetScript("OnEnter", function(self)
-            pcall(function()
-                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                GameTooltip:SetUnitBuffByAuraInstanceID("focus", self.auraInstanceID)
-                GameTooltip:Show()
+        if JarUnitFramesDB.enableAuraTooltips then
+            buff:EnableMouse(true)
+            buff:SetScript("OnEnter", function(self)
+                if self.auraInstanceID and not GameTooltip:IsForbidden() then
+                    local success = pcall(function()
+                        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                        GameTooltip:SetUnitAuraByAuraInstanceID("focus", self.auraInstanceID)
+                        GameTooltip:Show()
+                    end)
+                end
             end)
-        end)
-        buff:SetScript("OnLeave", function() GameTooltip:Hide() end)
+            buff:SetScript("OnLeave", function()
+                if not GameTooltip:IsForbidden() then
+                    GameTooltip:Hide()
+                end
+            end)
+        else
+            buff:EnableMouse(false)
+        end
         
         buff:Hide()
         frame.buffs[i] = buff
@@ -1178,14 +1202,25 @@ function CreateTargetTargetFrame()
             buff.count:SetPoint("BOTTOMRIGHT", 2, 0)
             buff.count:SetFont(font, 10, "OUTLINE")
             
-            buff:SetScript("OnEnter", function(self)
-                pcall(function()
-                    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                    GameTooltip:SetUnitBuffByAuraInstanceID("targettarget", self.auraInstanceID)
-                    GameTooltip:Show()
+            if JarUnitFramesDB.enableAuraTooltips then
+                buff:EnableMouse(true)
+                buff:SetScript("OnEnter", function(self)
+                    if self.auraInstanceID and not GameTooltip:IsForbidden() then
+                        local success = pcall(function()
+                            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                            GameTooltip:SetUnitAuraByAuraInstanceID("targettarget", self.auraInstanceID)
+                            GameTooltip:Show()
+                        end)
+                    end
                 end)
-            end)
-            buff:SetScript("OnLeave", function() GameTooltip:Hide() end)
+                buff:SetScript("OnLeave", function()
+                    if not GameTooltip:IsForbidden() then
+                        GameTooltip:Hide()
+                    end
+                end)
+            else
+                buff:EnableMouse(false)
+            end
             
         buff:Hide()
         frame.buffs[i] = buff
@@ -1412,14 +1447,25 @@ function CreatePetFrame()
         buff.cooldown:SetReverse(true)
         buff.cooldown:SetHideCountdownNumbers(true)
         
-        buff:SetScript("OnEnter", function(self)
-            pcall(function()
-                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                GameTooltip:SetUnitBuffByAuraInstanceID("pet", self.auraInstanceID)
-                GameTooltip:Show()
+        if JarUnitFramesDB.enableAuraTooltips then
+            buff:EnableMouse(true)
+            buff:SetScript("OnEnter", function(self)
+                if self.auraInstanceID and not GameTooltip:IsForbidden() then
+                    local success = pcall(function()
+                        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                        GameTooltip:SetUnitAuraByAuraInstanceID("pet", self.auraInstanceID)
+                        GameTooltip:Show()
+                    end)
+                end
             end)
-        end)
-        buff:SetScript("OnLeave", function() GameTooltip:Hide() end)
+            buff:SetScript("OnLeave", function()
+                if not GameTooltip:IsForbidden() then
+                    GameTooltip:Hide()
+                end
+            end)
+        else
+            buff:EnableMouse(false)
+        end
         
         buff:Hide()
         frame.buffs[i] = buff
@@ -1651,17 +1697,25 @@ function CreatePartyFrame(partyNum)
         buff.cooldown:SetReverse(true)
         buff.cooldown:SetHideCountdownNumbers(true)
         
-        buff:EnableMouse(true)
-        buff:SetScript("OnEnter", function(self)
-            if self.auraInstanceID then
-                pcall(function()
-                    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                    GameTooltip:SetUnitBuffByAuraInstanceID("party"..partyNum, self.auraInstanceID)
-                    GameTooltip:Show()
-                end)
-            end
-        end)
-        buff:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        if JarUnitFramesDB.enableAuraTooltips then
+            buff:EnableMouse(true)
+            buff:SetScript("OnEnter", function(self)
+                if self.auraInstanceID and not GameTooltip:IsForbidden() then
+                    local success = pcall(function()
+                        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                        GameTooltip:SetUnitAuraByAuraInstanceID("party"..partyNum, self.auraInstanceID)
+                        GameTooltip:Show()
+                    end)
+                end
+            end)
+            buff:SetScript("OnLeave", function()
+                if not GameTooltip:IsForbidden() then
+                    GameTooltip:Hide()
+                end
+            end)
+        else
+            buff:EnableMouse(false)
+        end
         
         buff:Hide()
         frame.buffs[i] = buff
