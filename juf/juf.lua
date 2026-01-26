@@ -309,19 +309,35 @@ local function CreatePlayerFrame()
     -- Health text (right side)
     frame.healthText = frame.healthBar:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     frame.healthText:SetPoint("RIGHT", frame.healthBar, "RIGHT", -5, 0)
-    frame.healthText:SetText("100")
     frame.healthText:SetJustifyH("RIGHT")
-    frame.healthText:SetFont(font, fontSize, "OUTLINE")
+    frame.healthText:SetText("100")
     
     -- Power bar
     frame.powerBar = CreateFrame("StatusBar", nil, frame)
     frame.powerBar:SetSize(220, 8)
     frame.powerBar:SetPoint("TOP", 0, -22)
-    frame.powerBar:EnableMouse(false)  -- Allow clicks to pass through
+    frame.powerBar:EnableMouse(true)
     frame.powerBar:SetStatusBarTexture(texture)
     frame.powerBar:SetStatusBarColor(0, 0.4, 1)  -- Blue
     frame.powerBar:SetMinMaxValues(0, 100)
     frame.powerBar:SetValue(100)
+    frame.powerBar:SetScript("OnEnter", function(self)
+        if not GameTooltip:IsForbidden() then
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            local power = UnitPower("player")
+            local maxPower = UnitPowerMax("player")
+            local powerType = UnitPowerType("player")
+            local powerName = _G["POWER_TYPE_" .. (powerType or 0)] or "Power"
+            GameTooltip:SetText(powerName, 1, 1, 1)
+            GameTooltip:AddLine(BreakUpLargeNumbers(power) .. " / " .. BreakUpLargeNumbers(maxPower), 1, 1, 1)
+            GameTooltip:Show()
+        end
+    end)
+    frame.powerBar:SetScript("OnLeave", function()
+        if not GameTooltip:IsForbidden() then
+            GameTooltip:Hide()
+        end
+    end)
     
     -- Power bar border
     frame.powerBar.border = CreateFrame("Frame", nil, frame.powerBar, "BackdropTemplate")
@@ -361,9 +377,8 @@ local function CreatePlayerFrame()
     frame.restingIcon:Hide()
     
     -- Level text (optional)
-    frame.levelText = frame.healthBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    frame.levelText = frame.healthBar:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     frame.levelText:SetPoint("LEFT", frame.healthBar, "LEFT", 5, 0)
-    frame.levelText:SetFont(font, fontSize, "OUTLINE")
     if JarUnitFramesDB.showLevel then
         frame.levelText:SetText(UnitLevel("player"))
     else
@@ -373,9 +388,8 @@ local function CreatePlayerFrame()
     -- Name text (below the frame)
     frame.name = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     frame.name:SetPoint("TOPLEFT", frame.powerBar, "BOTTOMLEFT", 0, -5)
-    frame.name:SetText("Player")
     frame.name:SetJustifyH("LEFT")
-    frame.name:SetFont(font, fontSize, "OUTLINE")
+    frame.name:SetText("Player")
     
     -- Buff container (above the frame)
     frame.buffs = {}
@@ -615,28 +629,43 @@ local function CreateTargetFrame()
     frame.healthBar.bg:SetVertexColor(0.3, 0, 0)
     
     -- Health text (left side)
-    frame.healthText = frame.healthBar:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    frame.healthText = frame.healthBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     frame.healthText:SetPoint("LEFT", frame.healthBar, "LEFT", 5, 0)
-    frame.healthText:SetText("0")
     frame.healthText:SetJustifyH("LEFT")
-    frame.healthText:SetFont(font, fontSize, "OUTLINE")
+    frame.healthText:SetText("0")
     
     -- Level text (optional)
     frame.levelText = frame.healthBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     frame.levelText:SetPoint("RIGHT", frame.healthBar, "RIGHT", -5, 0)
-    frame.levelText:SetFont(font, fontSize, "OUTLINE")
     frame.levelText:SetText("")
     
     -- Power bar
     frame.powerBar = CreateFrame("StatusBar", nil, frame)
     frame.powerBar:SetSize(220, 8)
     frame.powerBar:SetPoint("TOP", 0, -22)
-    frame.powerBar:EnableMouse(false)  -- Allow clicks to pass through
+    frame.powerBar:EnableMouse(true)
     frame.powerBar:SetStatusBarTexture(texture)
     frame.powerBar:SetStatusBarColor(0, 0.4, 1)
     frame.powerBar:SetMinMaxValues(0, 100)
     frame.powerBar:SetValue(0)
     frame.powerBar:SetReverseFill(true)  -- Fill from right to left
+    frame.powerBar:SetScript("OnEnter", function(self)
+        if UnitExists("target") and not GameTooltip:IsForbidden() then
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            local power = UnitPower("target")
+            local maxPower = UnitPowerMax("target")
+            local powerType = UnitPowerType("target")
+            local powerName = _G["POWER_TYPE_" .. (powerType or 0)] or "Power"
+            GameTooltip:SetText(powerName, 1, 1, 1)
+            GameTooltip:AddLine(BreakUpLargeNumbers(power) .. " / " .. BreakUpLargeNumbers(maxPower), 1, 1, 1)
+            GameTooltip:Show()
+        end
+    end)
+    frame.powerBar:SetScript("OnLeave", function()
+        if not GameTooltip:IsForbidden() then
+            GameTooltip:Hide()
+        end
+    end)
     
     -- Power bar border
     frame.powerBar.border = CreateFrame("Frame", nil, frame.powerBar, "BackdropTemplate")
@@ -657,9 +686,8 @@ local function CreateTargetFrame()
     -- Name text (below the frame, right side)
     frame.name = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     frame.name:SetPoint("TOPRIGHT", frame.powerBar, "BOTTOMRIGHT", 0, -5)
-    frame.name:SetText("No Target")
     frame.name:SetJustifyH("RIGHT")
-    frame.name:SetFont(font, fontSize, "OUTLINE")
+    frame.name:SetText("No Target")
     
     -- Buff container (above the frame)
     frame.buffs = {}
@@ -882,28 +910,43 @@ function CreateFocusFrame()
     frame.healthBar.bg:SetVertexColor(0.3, 0, 0)
     
     -- Health text
-    frame.healthText = frame.healthBar:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    frame.healthText = frame.healthBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     frame.healthText:SetPoint("LEFT", frame.healthBar, "LEFT", 5, 0)
-    frame.healthText:SetText("0")
     frame.healthText:SetJustifyH("LEFT")
-    frame.healthText:SetFont(font, fontSize, "OUTLINE")
+    frame.healthText:SetText("0")
     
     -- Level text
     frame.levelText = frame.healthBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     frame.levelText:SetPoint("RIGHT", frame.healthBar, "RIGHT", -5, 0)
-    frame.levelText:SetFont(font, fontSize, "OUTLINE")
     frame.levelText:SetText("")
     
     -- Power bar
     frame.powerBar = CreateFrame("StatusBar", nil, frame)
     frame.powerBar:SetSize(220, 8)
     frame.powerBar:SetPoint("TOP", 0, -22)
-    frame.powerBar:EnableMouse(false)
+    frame.powerBar:EnableMouse(true)
     frame.powerBar:SetStatusBarTexture(texture)
     frame.powerBar:SetStatusBarColor(0, 0.4, 1)
     frame.powerBar:SetMinMaxValues(0, 100)
     frame.powerBar:SetValue(0)
     frame.powerBar:SetReverseFill(true)
+    frame.powerBar:SetScript("OnEnter", function(self)
+        if UnitExists("focus") and not GameTooltip:IsForbidden() then
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            local power = UnitPower("focus")
+            local maxPower = UnitPowerMax("focus")
+            local powerType = UnitPowerType("focus")
+            local powerName = _G["POWER_TYPE_" .. (powerType or 0)] or "Power"
+            GameTooltip:SetText(powerName, 1, 1, 1)
+            GameTooltip:AddLine(BreakUpLargeNumbers(power) .. " / " .. BreakUpLargeNumbers(maxPower), 1, 1, 1)
+            GameTooltip:Show()
+        end
+    end)
+    frame.powerBar:SetScript("OnLeave", function()
+        if not GameTooltip:IsForbidden() then
+            GameTooltip:Hide()
+        end
+    end)
     
     -- Power bar border
     frame.powerBar.border = CreateFrame("Frame", nil, frame.powerBar, "BackdropTemplate")
@@ -924,9 +967,8 @@ function CreateFocusFrame()
     -- Name text
     frame.name = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     frame.name:SetPoint("TOPRIGHT", frame.powerBar, "BOTTOMRIGHT", 0, -5)
-    frame.name:SetText("No Focus")
     frame.name:SetJustifyH("RIGHT")
-    frame.name:SetFont(font, fontSize, "OUTLINE")
+    frame.name:SetText("No Focus")
     
     -- Buff container (above the frame)
     frame.buffs = {}
@@ -945,9 +987,8 @@ function CreateFocusFrame()
         buff.icon = buff:CreateTexture(nil, "ARTWORK")
         buff.icon:SetAllPoints()
         
-        buff.count = buff:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        buff.count = buff:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
         buff.count:SetPoint("BOTTOMRIGHT", 2, 0)
-        buff.count:SetFont(font, 10, "OUTLINE")
         
         -- Add cooldown frame for duration spiral
         buff.cooldown = CreateFrame("Cooldown", nil, buff, "CooldownFrameTemplate")
@@ -998,7 +1039,7 @@ function CreateFocusFrame()
         debuff.icon = debuff:CreateTexture(nil, "ARTWORK")
         debuff.icon:SetAllPoints()
         
-        debuff.count = debuff:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        debuff.count = debuff:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
         debuff.count:SetPoint("BOTTOMRIGHT", 2, 0)
         debuff.count:SetFont(font, 10, "OUTLINE")
         
@@ -1024,6 +1065,14 @@ function CreateFocusFrame()
     end
     
     frame:Show()
+    
+    -- Initial update to show buffs/debuffs if focus exists
+    if UnitExists("focus") then
+        UpdateFocusFrame()
+        UpdateFocusBuffs()
+        UpdateFocusDebuffs()
+    end
+    
     return frame
 end
 
@@ -1141,22 +1190,38 @@ function CreateTargetTargetFrame()
     frame.healthBar.bg:SetVertexColor(0.3, 0, 0)
     
     -- Health text
-    frame.healthText = frame.healthBar:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    frame.healthText = frame.healthBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     frame.healthText:SetPoint("LEFT", frame.healthBar, "LEFT", 5, 0)
-    frame.healthText:SetText("0")
     frame.healthText:SetJustifyH("LEFT")
-    frame.healthText:SetFont(font, fontSize, "OUTLINE")
+    frame.healthText:SetText("0")
     
     -- Power bar
     frame.powerBar = CreateFrame("StatusBar", nil, frame)
     frame.powerBar:SetSize(width, 8)
     frame.powerBar:SetPoint("TOP", 0, -22)
-    frame.powerBar:EnableMouse(false)
+    frame.powerBar:EnableMouse(true)
     frame.powerBar:SetStatusBarTexture(texture)
     frame.powerBar:SetStatusBarColor(0, 0.4, 1)
     frame.powerBar:SetMinMaxValues(0, 100)
     frame.powerBar:SetValue(0)
     frame.powerBar:SetReverseFill(false)
+    frame.powerBar:SetScript("OnEnter", function(self)
+        if UnitExists("targettarget") and not GameTooltip:IsForbidden() then
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            local power = UnitPower("targettarget")
+            local maxPower = UnitPowerMax("targettarget")
+            local powerType = UnitPowerType("targettarget")
+            local powerName = _G["POWER_TYPE_" .. (powerType or 0)] or "Power"
+            GameTooltip:SetText(powerName, 1, 1, 1)
+            GameTooltip:AddLine(BreakUpLargeNumbers(power) .. " / " .. BreakUpLargeNumbers(maxPower), 1, 1, 1)
+            GameTooltip:Show()
+        end
+    end)
+    frame.powerBar:SetScript("OnLeave", function()
+        if not GameTooltip:IsForbidden() then
+            GameTooltip:Hide()
+        end
+    end)
     
     -- Power bar border
     frame.powerBar.border = CreateFrame("Frame", nil, frame.powerBar, "BackdropTemplate")
@@ -1175,11 +1240,10 @@ function CreateTargetTargetFrame()
     frame.powerBar.bg:SetAlpha(JarUnitFramesDB.bgAlpha)
     
     -- Name text
-    frame.name = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    frame.name = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     frame.name:SetPoint("TOPLEFT", frame.powerBar, "BOTTOMLEFT", 0, -5)
-    frame.name:SetText("No ToT")
     frame.name:SetJustifyH("LEFT")
-    frame.name:SetFont(font, fontSize, "OUTLINE")
+    frame.name:SetText("No ToT")
     
     -- Buff container (above the frame)
     frame.buffs = {}
@@ -1198,9 +1262,8 @@ function CreateTargetTargetFrame()
             buff.icon = buff:CreateTexture(nil, "ARTWORK")
             buff.icon:SetAllPoints()
             
-            buff.count = buff:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            buff.count = buff:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
             buff.count:SetPoint("BOTTOMRIGHT", 2, 0)
-            buff.count:SetFont(font, 10, "OUTLINE")
             
             if JarUnitFramesDB.enableAuraTooltips then
                 buff:EnableMouse(true)
@@ -1243,9 +1306,10 @@ function CreateTargetTargetFrame()
         debuff.icon = debuff:CreateTexture(nil, "ARTWORK")
         debuff.icon:SetAllPoints()
         
-        debuff.count = debuff:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        debuff.count = debuff:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
         debuff.count:SetPoint("BOTTOMRIGHT", 2, 0)
         debuff.count:SetFont(font, 10, "OUTLINE")
+        debuff.count:SetTextColor(1, 1, 1)
         
         debuff:SetScript("OnEnter", function(self)
             pcall(function()
@@ -1261,6 +1325,18 @@ function CreateTargetTargetFrame()
     end
     
     frame:Show()
+    
+    -- Initial update to show buffs/debuffs if targettarget exists
+    if UnitExists("targettarget") then
+        UpdateTargetTargetFrame()
+        if JarUnitFramesDB.totShowBuffs then
+            UpdateTargetTargetBuffs()
+        end
+        if JarUnitFramesDB.totShowDebuffs then
+            UpdateTargetTargetDebuffs()
+        end
+    end
+    
     return frame
 end
 
@@ -1378,22 +1454,38 @@ function CreatePetFrame()
     frame.healthBar.bg:SetVertexColor(0.3, 0, 0)
     
     -- Health text
-    frame.healthText = frame.healthBar:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    frame.healthText = frame.healthBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     frame.healthText:SetPoint("LEFT", frame.healthBar, "LEFT", 5, 0)
-    frame.healthText:SetText("0")
     frame.healthText:SetJustifyH("LEFT")
-    frame.healthText:SetFont(font, fontSize, "OUTLINE")
+    frame.healthText:SetText("0")
     
     -- Power bar
     frame.powerBar = CreateFrame("StatusBar", nil, frame)
     frame.powerBar:SetSize(width, 8)
     frame.powerBar:SetPoint("TOP", 0, -22)
-    frame.powerBar:EnableMouse(false)
+    frame.powerBar:EnableMouse(true)
     frame.powerBar:SetStatusBarTexture(texture)
     frame.powerBar:SetStatusBarColor(0, 0.4, 1)
     frame.powerBar:SetMinMaxValues(0, 100)
     frame.powerBar:SetValue(0)
     frame.powerBar:SetReverseFill(false)
+    frame.powerBar:SetScript("OnEnter", function(self)
+        if UnitExists("pet") and not GameTooltip:IsForbidden() then
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            local power = UnitPower("pet")
+            local maxPower = UnitPowerMax("pet")
+            local powerType = UnitPowerType("pet")
+            local powerName = _G["POWER_TYPE_" .. (powerType or 0)] or "Power"
+            GameTooltip:SetText(powerName, 1, 1, 1)
+            GameTooltip:AddLine(BreakUpLargeNumbers(power) .. " / " .. BreakUpLargeNumbers(maxPower), 1, 1, 1)
+            GameTooltip:Show()
+        end
+    end)
+    frame.powerBar:SetScript("OnLeave", function()
+        if not GameTooltip:IsForbidden() then
+            GameTooltip:Hide()
+        end
+    end)
     
     -- Power bar border
     frame.powerBar.border = CreateFrame("Frame", nil, frame.powerBar, "BackdropTemplate")
@@ -1412,11 +1504,10 @@ function CreatePetFrame()
     frame.powerBar.bg:SetAlpha(JarUnitFramesDB.bgAlpha)
     
     -- Name text
-    frame.name = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    frame.name = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     frame.name:SetPoint("TOPLEFT", frame.powerBar, "BOTTOMLEFT", 0, -5)
-    frame.name:SetText("No Pet")
     frame.name:SetJustifyH("LEFT")
-    frame.name:SetFont(font, fontSize, "OUTLINE")
+    frame.name:SetText("No Pet")
     
     -- Buff container (above the frame)
     frame.buffs = {}
@@ -1435,9 +1526,10 @@ function CreatePetFrame()
         buff.icon = buff:CreateTexture(nil, "ARTWORK")
         buff.icon:SetAllPoints()
         
-        buff.count = buff:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        buff.count = buff:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
         buff.count:SetPoint("BOTTOMRIGHT", 2, 0)
         buff.count:SetFont(font, 10, "OUTLINE")
+        buff.count:SetTextColor(1, 1, 1)
         
         -- Add cooldown frame for duration spiral
         buff.cooldown = CreateFrame("Cooldown", nil, buff, "CooldownFrameTemplate")
@@ -1488,9 +1580,10 @@ function CreatePetFrame()
         debuff.icon = debuff:CreateTexture(nil, "ARTWORK")
         debuff.icon:SetAllPoints()
         
-        debuff.count = debuff:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        debuff.count = debuff:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
         debuff.count:SetPoint("BOTTOMRIGHT", 2, 0)
         debuff.count:SetFont(font, 10, "OUTLINE")
+        debuff.count:SetTextColor(1, 1, 1)
         
         -- Add cooldown frame for duration spiral
         debuff.cooldown = CreateFrame("Cooldown", nil, debuff, "CooldownFrameTemplate")
@@ -1631,9 +1724,10 @@ function CreatePartyFrame(partyNum)
     frame.healthBar.bg:SetAlpha(JarUnitFramesDB.bgAlpha)
     
     -- Health text
-    frame.healthText = frame.healthBar:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    frame.healthText = frame.healthBar:CreateFontString(nil, "OVERLAY")
     frame.healthText:SetPoint("RIGHT", frame.healthBar, "RIGHT", -3, 0)
     frame.healthText:SetFont(font, fontSize, "OUTLINE")
+    frame.healthText:SetTextColor(1, 1, 0)
     frame.healthText:SetJustifyH("RIGHT")
     frame.healthText:SetText("")
     
@@ -1661,11 +1755,10 @@ function CreatePartyFrame(partyNum)
     frame.powerBar.bg:SetAlpha(JarUnitFramesDB.bgAlpha)
     
     -- Name text
-    frame.name = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    frame.name = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     frame.name:SetPoint("TOPLEFT", frame.powerBar, "BOTTOMLEFT", 0, -2)
-    frame.name:SetText("Party "..partyNum)
     frame.name:SetJustifyH("LEFT")
-    frame.name:SetFont(font, fontSize, "OUTLINE")
+    frame.name:SetText("Party "..partyNum)
     
     -- Buffs container (right side, growing rightward)
     frame.buffs = {}
@@ -1686,9 +1779,10 @@ function CreatePartyFrame(partyNum)
         buff.border:SetTexture("Interface\\Buttons\\UI-Debuff-Overlays")
         buff.border:SetTexCoord(0.296875, 0.5703125, 0, 0.515625)
         
-        buff.count = buff:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        buff.count = buff:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
         buff.count:SetPoint("BOTTOMRIGHT", 2, 0)
         buff.count:SetFont(font, 10, "OUTLINE")
+        buff.count:SetTextColor(1, 1, 1)
         
         buff.cooldown = CreateFrame("Cooldown", nil, buff, "CooldownFrameTemplate")
         buff.cooldown:SetAllPoints()
@@ -1740,9 +1834,8 @@ function CreatePartyFrame(partyNum)
         debuff.border:SetTexture("Interface\\Buttons\\UI-Debuff-Overlays")
         debuff.border:SetTexCoord(0.296875, 0.5703125, 0, 0.515625)
         
-        debuff.count = debuff:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        debuff.count = debuff:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
         debuff.count:SetPoint("BOTTOMRIGHT", 2, 0)
-        debuff.count:SetFont(font, 10, "OUTLINE")
         
         debuff.cooldown = CreateFrame("Cooldown", nil, debuff, "CooldownFrameTemplate")
         debuff.cooldown:SetAllPoints()
