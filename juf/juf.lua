@@ -502,11 +502,6 @@ local function CreatePlayerFrame()
         RegisterUnitWatch(frame)
     end
     
-    -- Register unit watch for automatic UNIT_AURA events
-    if not InCombatLockdown() then
-        RegisterUnitWatch(frame)
-    end
-    
     frame:Show()
     
     return frame
@@ -805,7 +800,7 @@ function CreateFocusFrame()
     frame:SetSize(220, 30)
     frame:SetAttribute("unit", "focus")
     frame:SetAttribute("*type1", "target")
-    frame:SetAttribute("*type2", "menu")
+    frame:SetAttribute("*type2", "togglemenu")
     frame:RegisterForClicks("AnyUp")
     
     -- Proper tooltip handling for SecureUnitButton (prevents taint)
@@ -1083,7 +1078,7 @@ function CreateTargetTargetFrame()
     frame:SetSize(width, 30)
     frame:SetAttribute("unit", "targettarget")
     frame:SetAttribute("*type1", "target")
-    frame:SetAttribute("*type2", "menu")
+    frame:SetAttribute("*type2", "togglemenu")
     frame:RegisterForClicks("AnyUp")
     
     -- Proper tooltip handling for SecureUnitButton (prevents taint)
@@ -1347,7 +1342,7 @@ function CreatePetFrame()
     frame:SetSize(width, 30)
     frame:SetAttribute("unit", "pet")
     frame:SetAttribute("*type1", "target")
-    frame:SetAttribute("*type2", "menu")
+    frame:SetAttribute("*type2", "togglemenu")
     frame:RegisterForClicks("AnyUp")
     
     -- Proper tooltip handling for SecureUnitButton (prevents taint)
@@ -1618,12 +1613,14 @@ function CreatePartyFrame(partyNum)
     local width = JarUnitFramesDB.partyWidth or 150
     
     local frame = CreateFrame("Button", "JUF_PartyFrame"..partyNum, UIParent, "SecureUnitButtonTemplate")
-    frame:SetSize(width, 30)
+    frame:SetSize(width, 45)
+    frame:SetFrameStrata("MEDIUM")
+    frame:SetFrameLevel(10)
     frame:SetAttribute("unit", "party"..partyNum)
-    frame:SetAttribute("*type1", "target")
-    frame:SetAttribute("*type2", "menu")
+    frame:SetAttribute("type1", "target")
+    frame:SetAttribute("type2", "togglemenu")
     frame:RegisterForClicks("AnyUp")
-    
+
     -- Proper tooltip handling for SecureUnitButton (prevents taint)
     frame:SetScript("OnEnter", function(self)
         local unit = self:GetAttribute("unit")
@@ -1636,13 +1633,6 @@ function CreatePartyFrame(partyNum)
     frame:SetScript("OnLeave", function(self)
         GameTooltip:Hide()
     end)
-    frame:SetSize(width, 45)
-    frame:SetFrameStrata("MEDIUM")
-    frame:SetFrameLevel(10)
-    frame:SetAttribute("unit", "party"..partyNum)
-    frame:SetAttribute("type1", "target")
-    frame:SetAttribute("type2", "togglemenu")
-    frame:RegisterForClicks("AnyUp")
     
     -- Make frame movable when unlocked (use Shift+Drag to avoid conflicts with secure clicks)
     frame:SetMovable(true)
@@ -1893,29 +1883,28 @@ function UpdatePlayerBuffs()
             -- Update cooldown spiral
             if buff.cooldown and auraData.duration and auraData.expirationTime then
                 if C_StringUtil.TruncateWhenZero(auraData.duration) then
-                    buff.cooldown:SetCooldown(auraData.duration, auraData.expirationTime)
                     buff.cooldown:SetCooldownFromExpirationTime(auraData.expirationTime, auraData.duration)
                     buff.cooldown:Show()
                 else
                     buff.cooldown:Hide()
                 end
             end
-            
+
             buff:Show()
             buffIndex = buffIndex + 1
         end
     end
-    
+
     -- Hide unused buff frames
     for i = buffIndex, 40 do
         playerFrame.buffs[i]:Hide()
-    end 
+    end
 end
 
 -- Update target buffs (only for friendly targets)
 function UpdateTargetBuffs()
     if not targetFrame or not targetFrame.buffs then return end
-    
+
     -- Hide all buffs if no target
     if not UnitExists("target") then
         for i = 1, 40 do
@@ -1923,33 +1912,32 @@ function UpdateTargetBuffs()
         end
         return
     end
-    
+
     -- Use GetUnitAuras for more efficient batch retrieval
     local auras = C_UnitAuras.GetUnitAuras("target", "HELPFUL", 40) or {}
     local buffIndex = 1
-    
+
     for _, auraData in ipairs(auras) do
         if buffIndex > 40 then break end
-        
+
         -- Skip permanent buffs if option is enabled (only check out of combat to avoid secret value errors)
         local skipBuff = false
         if JarUnitFramesDB.hideTargetPermanentBuffs and not UnitAffectingCombat("player") then
             local hasTimer = auraData.expirationTime and auraData.expirationTime > 0
             skipBuff = not hasTimer
         end
-        
+
         if not skipBuff then
             local buff = targetFrame.buffs[buffIndex]
             buff.icon:SetTexture(auraData.icon)
             buff.auraInstanceID = auraData.auraInstanceID
-            
+
             -- Show stack count (SetText handles secret values safely)
             buff.count:SetText(C_UnitAuras.GetAuraApplicationDisplayCount("target", auraData.auraInstanceID, 2, 99))
-            
+
             -- Update cooldown spiral
             if buff.cooldown and auraData.duration and auraData.expirationTime then
                 if C_StringUtil.TruncateWhenZero(auraData.duration) then
-                    buff.cooldown:SetCooldown(auraData.duration, auraData.expirationTime)
                     buff.cooldown:SetCooldownFromExpirationTime(auraData.expirationTime, auraData.duration)
                     buff.cooldown:Show()
                 else
@@ -1985,22 +1973,21 @@ function UpdatePlayerDebuffs()
         
         -- Show stack count (SetText handles secret values safely)
         debuff.count:SetText(C_UnitAuras.GetAuraApplicationDisplayCount("player", auraData.auraInstanceID, 2, 99))
-        
+
         -- Update cooldown spiral
         if debuff.cooldown and auraData.duration and auraData.expirationTime then
             if C_StringUtil.TruncateWhenZero(auraData.duration) then
-                debuff.cooldown:SetCooldown(auraData.duration, auraData.expirationTime)
                 debuff.cooldown:SetCooldownFromExpirationTime(auraData.expirationTime, auraData.duration)
                 debuff.cooldown:Show()
             else
                 debuff.cooldown:Hide()
             end
         end
-        
+
         debuff:Show()
         debuffIndex = debuffIndex + 1
     end
-    
+
     -- Hide unused debuff frames
     for i = debuffIndex, 40 do
         playerFrame.debuffs[i]:Hide()
@@ -2010,7 +1997,7 @@ end
 -- Update target debuffs (with position swapping for enemies)
 function UpdateTargetDebuffs()
     if not targetFrame or not targetFrame.debuffs then return end
-    
+
     -- Hide all debuffs if no target
     if not UnitExists("target") then
         for i = 1, 40 do
@@ -2018,25 +2005,24 @@ function UpdateTargetDebuffs()
         end
         return
     end
-    
+
     -- Use GetUnitAuras for harmful effects
     local auras = C_UnitAuras.GetUnitAuras("target", "HARMFUL", 40) or {}
     local debuffIndex = 1
-    
+
     for _, auraData in ipairs(auras) do
         if debuffIndex > 40 then break end
-        
+
         local debuff = targetFrame.debuffs[debuffIndex]
         debuff.icon:SetTexture(auraData.icon)
         debuff.auraInstanceID = auraData.auraInstanceID
-        
+
         -- Show stack count (SetText handles secret values safely)
         debuff.count:SetText(C_UnitAuras.GetAuraApplicationDisplayCount("target", auraData.auraInstanceID, 2, 99))
-        
+
         -- Update cooldown spiral
         if debuff.cooldown and auraData.duration and auraData.expirationTime then
             if C_StringUtil.TruncateWhenZero(auraData.duration) then
-                debuff.cooldown:SetCooldown(auraData.duration, auraData.expirationTime)
                 debuff.cooldown:SetCooldownFromExpirationTime(auraData.expirationTime, auraData.duration)
                 debuff.cooldown:Show()
             else
@@ -2764,7 +2750,6 @@ function UpdatePartyBuffs(partyNum)
         local expirationTime = auraData.expirationTime
         
         if duration and C_StringUtil.TruncateWhenZero(duration) then
-            buff.cooldown:SetCooldown(duration, expirationTime)
             buff.cooldown:SetCooldownFromExpirationTime(expirationTime, duration)
         else
             buff.cooldown:Clear()
@@ -2813,7 +2798,6 @@ function UpdatePartyDebuffs(partyNum)
         local expirationTime = auraData.expirationTime
         
         if duration and C_StringUtil.TruncateWhenZero(duration) then
-            debuff.cooldown:SetCooldown(duration, expirationTime)
             debuff.cooldown:SetCooldownFromExpirationTime(expirationTime, duration)
         else
             debuff.cooldown:Clear()
@@ -3319,9 +3303,6 @@ local function CreateConfigFrame()
     textureLabel:SetPoint("TOPLEFT", bgAlphaSlider, "BOTTOMLEFT", 0, -30)
     textureLabel:SetText("Bar Texture:")
     
-    local textureDropdown = CreateFrame("Frame", "JUF_TextureDropdown", frame, "UIDropDownMenuTemplate")
-    textureDropdown:SetPoint("TOPLEFT", textureLabel, "BOTTOMLEFT", -10, -5)
-    
     -- Get current texture name
     local function GetCurrentTextureName()
         for name, path in pairs(TEXTURES) do
@@ -3331,32 +3312,25 @@ local function CreateConfigFrame()
         end
         return "Blizzard"
     end
-    
-    -- Initialize dropdown
-    UIDropDownMenu_SetWidth(textureDropdown, 150)
-    UIDropDownMenu_SetText(textureDropdown, GetCurrentTextureName())
-    
-    -- Dropdown menu function
-    UIDropDownMenu_Initialize(textureDropdown, function(self, level)
-        local info = UIDropDownMenu_CreateInfo()
+
+    local textureDropdown = CreateFrame("DropdownButton", nil, frame, "WowStyle1DropdownTemplate")
+    textureDropdown:SetPoint("TOPLEFT", textureLabel, "BOTTOMLEFT", 0, -5)
+    textureDropdown:SetWidth(180)
+    textureDropdown:SetDefaultText(GetCurrentTextureName())
+    textureDropdown:SetupMenu(function(_, rootDescription)
         for name, path in pairs(TEXTURES) do
-            info.text = name
-            info.func = function()
-                JarUnitFramesDB.texture = path
-                UIDropDownMenu_SetText(textureDropdown, name)
-                
-                -- Update frame textures
-                if playerFrame then
-                    UpdateFrameTextures(playerFrame)
-                end
-                if targetFrame then
-                    UpdateFrameTextures(targetFrame)
-                end
-            
-                print("|cff00ff00Jar's Unit Frames|r Texture changed to " .. name)
-            end
-            info.checked = (path == JarUnitFramesDB.texture)
-            UIDropDownMenu_AddButton(info)
+            rootDescription:CreateRadio(name,
+                function() return JarUnitFramesDB.texture == path end,
+                function()
+                    JarUnitFramesDB.texture = path
+                    if playerFrame then
+                        UpdateFrameTextures(playerFrame)
+                    end
+                    if targetFrame then
+                        UpdateFrameTextures(targetFrame)
+                    end
+                    print("|cff00ff00Jar's Unit Frames|r Texture changed to " .. name)
+                end)
         end
     end)
     frame.textureDropdown = textureDropdown
@@ -3365,9 +3339,6 @@ local function CreateConfigFrame()
     local fontLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     fontLabel:SetPoint("TOPLEFT", textureLabel, "BOTTOMLEFT", 0, -45)
     fontLabel:SetText("Font:")
-    
-    local fontDropdown = CreateFrame("Frame", "JUF_FontDropdown", frame, "UIDropDownMenuTemplate")
-    fontDropdown:SetPoint("TOPLEFT", fontLabel, "BOTTOMLEFT", -10, -5)
     
     -- Get current font name
     local function GetCurrentFontName()
@@ -3378,32 +3349,25 @@ local function CreateConfigFrame()
         end
         return "Friz Quadrata (Default)"
     end
-    
-    -- Initialize dropdown
-    UIDropDownMenu_SetWidth(fontDropdown, 150)
-    UIDropDownMenu_SetText(fontDropdown, GetCurrentFontName())
-    
-    -- Dropdown menu function
-    UIDropDownMenu_Initialize(fontDropdown, function(self, level)
-        local info = UIDropDownMenu_CreateInfo()
+
+    local fontDropdown = CreateFrame("DropdownButton", nil, frame, "WowStyle1DropdownTemplate")
+    fontDropdown:SetPoint("TOPLEFT", fontLabel, "BOTTOMLEFT", 0, -5)
+    fontDropdown:SetWidth(180)
+    fontDropdown:SetDefaultText(GetCurrentFontName())
+    fontDropdown:SetupMenu(function(_, rootDescription)
         for name, path in pairs(FONTS) do
-            info.text = name
-            info.func = function()
-                JarUnitFramesDB.font = path
-                UIDropDownMenu_SetText(fontDropdown, name)
-                
-                -- Update frame fonts
-                if playerFrame then
-                    UpdateFrameFonts(playerFrame)
-                end
-                if targetFrame then
-                    UpdateFrameFonts(targetFrame)
-                end
-            
-                print("|cff00ff00Jar's Unit Frames|r Font changed to " .. name)
-            end
-            info.checked = (path == JarUnitFramesDB.font)
-            UIDropDownMenu_AddButton(info)
+            rootDescription:CreateRadio(name,
+                function() return JarUnitFramesDB.font == path end,
+                function()
+                    JarUnitFramesDB.font = path
+                    if playerFrame then
+                        UpdateFrameFonts(playerFrame)
+                    end
+                    if targetFrame then
+                        UpdateFrameFonts(targetFrame)
+                    end
+                    print("|cff00ff00Jar's Unit Frames|r Font changed to " .. name)
+                end)
         end
     end)
     
