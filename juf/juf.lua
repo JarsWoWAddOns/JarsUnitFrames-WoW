@@ -4,6 +4,22 @@
 -- Saved variables with defaults
 JarUnitFramesDB = JarUnitFramesDB or {}
 
+-- Modern UI Color Palette
+local UI_PALETTE = {
+    bg = {0.10, 0.10, 0.12, 0.95},
+    header = {0.15, 0.15, 0.18, 1},
+    accent = {0.30, 0.75, 0.75, 1},
+    text = {0.95, 0.95, 0.95, 1},
+    textDim = {0.70, 0.70, 0.70, 1},
+    border = {0.20, 0.20, 0.22, 1},
+}
+
+local modernBackdrop = {
+    bgFile = "Interface\\Buttons\\WHITE8X8",
+    edgeFile = "Interface\\Buttons\\WHITE8X8",
+    edgeSize = 1,
+}
+
 -- Default values (will be applied in PLAYER_LOGIN after SavedVariables load)
 local defaults = {
     showPlayerFrame = true,
@@ -2813,9 +2829,106 @@ function UpdatePartyDebuffs(partyNum)
     end
 end
 
+-- Modern UI Helper Functions
+local function CreateModernSlider(parent, label, minVal, maxVal, step, getValue, setValue)
+    local slider = CreateFrame("Slider", nil, parent, "MinimalSliderTemplate")
+    slider:SetSize(200, 18)
+    slider:SetMinMaxValues(minVal, maxVal)
+    slider:SetValueStep(step)
+    slider:SetObeyStepOnDrag(true)
+    
+    local bg = slider:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    bg:SetColorTexture(0.05, 0.05, 0.05, 0.8)
+    
+    local fill = slider:CreateTexture(nil, "ARTWORK")
+    fill:SetHeight(4)
+    fill:SetPoint("LEFT")
+    fill:SetColorTexture(UI_PALETTE.accent[1], UI_PALETTE.accent[2], UI_PALETTE.accent[3], 0.6)
+    slider.fill = fill
+    
+    slider:SetThumbTexture("Interface\\Buttons\\WHITE8X8")
+    local thumb = slider:GetThumbTexture()
+    thumb:SetSize(14, 14)
+    thumb:SetColorTexture(UI_PALETTE.accent[1], UI_PALETTE.accent[2], UI_PALETTE.accent[3], 1)
+    
+    local labelText = slider:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    labelText:SetPoint("BOTTOM", slider, "TOP", 0, 4)
+    labelText:SetTextColor(UI_PALETTE.text[1], UI_PALETTE.text[2], UI_PALETTE.text[3])
+    slider.label = labelText
+    
+    local function updateLabel()
+        local value = getValue()
+        labelText:SetText(label .. ": " .. value)
+        local pct = (value - minVal) / (maxVal - minVal)
+        fill:SetWidth(slider:GetWidth() * pct)
+    end
+    
+    slider:SetScript("OnValueChanged", function(self, value)
+        setValue(value)
+        updateLabel()
+    end)
+    
+    updateLabel()
+    return slider
+end
+
+local function CreateModernCheck(parent, label, getValue, setValue)
+    local check = CreateFrame("CheckButton", nil, parent)
+    check:SetSize(18, 18)
+    
+    local bg = check:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    bg:SetColorTexture(0.05, 0.05, 0.05, 0.9)
+    
+    local border = check:CreateTexture(nil, "BORDER")
+    border:SetPoint("TOPLEFT", -1, 1)
+    border:SetPoint("BOTTOMRIGHT", 1, -1)
+    border:SetColorTexture(UI_PALETTE.border[1], UI_PALETTE.border[2], UI_PALETTE.border[3], 1)
+    
+    local checkTex = check:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    checkTex:SetPoint("CENTER", 0, 0)
+    checkTex:SetText("✓")
+    checkTex:SetTextColor(UI_PALETTE.accent[1], UI_PALETTE.accent[2], UI_PALETTE.accent[3], 1)
+    check.checkTex = checkTex
+    
+    local labelText = check:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    labelText:SetPoint("LEFT", check, "RIGHT", 8, 0)
+    labelText:SetText(label)
+    labelText:SetTextColor(UI_PALETTE.text[1], UI_PALETTE.text[2], UI_PALETTE.text[3])
+    check.text = labelText
+    
+    local function updateCheck()
+        checkTex:SetShown(getValue())
+    end
+    
+    check:SetScript("OnClick", function()
+        setValue(not getValue())
+        updateCheck()
+    end)
+    
+    updateCheck()
+    return check
+end
+
+local function CreateSectionHeader(parent, text)
+    local header = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    header:SetTextColor(UI_PALETTE.accent[1], UI_PALETTE.accent[2], UI_PALETTE.accent[3], 1)
+    header:SetText(text:upper())
+    
+    local line = parent:CreateTexture(nil, "ARTWORK")
+    line:SetHeight(1)
+    line:SetPoint("LEFT", header, "RIGHT", 8, 0)
+    line:SetColorTexture(UI_PALETTE.accent[1], UI_PALETTE.accent[2], UI_PALETTE.accent[3], 0.3)
+    line:SetWidth(100)
+    
+    header.line = line
+    return header
+end
+
 -- Create config window
 local function CreateConfigFrame()
-    local frame = CreateFrame("Frame", "JUF_ConfigFrame", UIParent, "BasicFrameTemplateWithInset")
+    local frame = CreateFrame("Frame", "JUF_ConfigFrame", UIParent, "BackdropTemplate")
     frame:SetSize(600, 700)
     frame:SetPoint("CENTER")
     frame:Hide()
@@ -2825,9 +2938,52 @@ local function CreateConfigFrame()
     frame:SetScript("OnDragStart", frame.StartMoving)
     frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
     
-    frame.title = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    frame.title:SetPoint("TOP", 0, -5)
+    -- Modern background
+    frame:SetBackdrop(modernBackdrop)
+    frame:SetBackdropColor(unpack(UI_PALETTE.bg))
+    frame:SetBackdropBorderColor(unpack(UI_PALETTE.border))
+    
+    -- Title bar with teal accent
+    local titleBar = frame:CreateTexture(nil, "OVERLAY")
+    titleBar:SetPoint("TOPLEFT", 1, -1)
+    titleBar:SetPoint("TOPRIGHT", -1, -1)
+    titleBar:SetHeight(32)
+    titleBar:SetColorTexture(UI_PALETTE.header[1], UI_PALETTE.header[2], UI_PALETTE.header[3], UI_PALETTE.header[4])
+    
+    local titleAccent = frame:CreateTexture(nil, "OVERLAY")
+    titleAccent:SetPoint("TOPLEFT", titleBar, "BOTTOMLEFT", 0, 0)
+    titleAccent:SetPoint("TOPRIGHT", titleBar, "BOTTOMRIGHT", 0, 0)
+    titleAccent:SetHeight(2)
+    titleAccent:SetColorTexture(UI_PALETTE.accent[1], UI_PALETTE.accent[2], UI_PALETTE.accent[3], UI_PALETTE.accent[4])
+    
+    frame.title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    frame.title:SetPoint("TOP", titleBar, "TOP", 0, -8)
     frame.title:SetText("Jar's Unit Frames Config")
+    frame.title:SetTextColor(UI_PALETTE.text[1], UI_PALETTE.text[2], UI_PALETTE.text[3])
+    
+    -- Modern close button
+    local closeBtn = CreateFrame("Button", nil, frame)
+    closeBtn:SetSize(20, 20)
+    closeBtn:SetPoint("TOPRIGHT", -6, -6)
+    closeBtn:SetNormalTexture("Interface\\AddOns\\JarsUnitFrames\\Assets\\close")
+    closeBtn:SetHighlightTexture("Interface\\AddOns\\JarsUnitFrames\\Assets\\close")
+    closeBtn:GetHighlightTexture():SetAlpha(0.3)
+    local closeBtnBg = closeBtn:CreateTexture(nil, "BACKGROUND")
+    closeBtnBg:SetAllPoints()
+    closeBtnBg:SetColorTexture(0.05, 0.05, 0.05, 0.8)
+    local closeBtnText = closeBtn:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    closeBtnText:SetPoint("CENTER", 0, 1)
+    closeBtnText:SetText("✕")
+    closeBtnText:SetTextColor(UI_PALETTE.textDim[1], UI_PALETTE.textDim[2], UI_PALETTE.textDim[3])
+    closeBtn:SetScript("OnEnter", function(self)
+        closeBtnText:SetTextColor(UI_PALETTE.accent[1], UI_PALETTE.accent[2], UI_PALETTE.accent[3])
+    end)
+    closeBtn:SetScript("OnLeave", function(self)
+        closeBtnText:SetTextColor(UI_PALETTE.textDim[1], UI_PALETTE.textDim[2], UI_PALETTE.textDim[3])
+    end)
+    closeBtn:SetScript("OnClick", function() frame:Hide() end)
+    
+    -- Remove old drag registration and add it after backdrop setup
     
     -- Unlock frames checkbox
     local unlockCheck = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
