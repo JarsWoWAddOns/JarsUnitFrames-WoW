@@ -8,7 +8,7 @@ JarUnitFramesDB = JarUnitFramesDB or {}
 local UI_PALETTE = {
     bg = {0.10, 0.10, 0.12, 0.95},
     header = {0.15, 0.15, 0.18, 1},
-    accent = {0.30, 0.75, 0.75, 1},
+    accent = {1.0, 0.55, 0.0, 1},
     text = {0.95, 0.95, 0.95, 1},
     textDim = {0.70, 0.70, 0.70, 1},
     border = {0.20, 0.20, 0.22, 1},
@@ -3656,7 +3656,7 @@ local function CreateConfigFrame()
         RepositionPartyFrames()
     end)
     frame.partyPaddingSlider = partyPaddingSlider
-    
+
     -- Close button is already provided by BasicFrameTemplateWithInset
     frame:SetScript("OnHide", function()
         -- Nothing needed
@@ -3796,7 +3796,7 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
             -- Position party frames vertically
             RepositionPartyFrames()
         end
-        
+
         -- Create config window
         local success, result = pcall(CreateConfigFrame)
         if success then
@@ -3896,7 +3896,7 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
                 UpdatePartyDebuffs(i)
             end
         end
-        
+
     elseif event == "PLAYER_TARGET_CHANGED" then
         -- Target changed, but frame events will handle the details
         -- Just do an initial update
