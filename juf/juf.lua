@@ -36,6 +36,7 @@ local defaults = {
     showLevel = false,
     bgAlpha = 0.8,
     enableAuraTooltips = true,   -- Show tooltip when hovering buff/debuff icons
+    showTargetItemLevel = true,    -- Show target's item level (players only)
     mirrorTargetPosition = false,
     playerPos = { point = "TOPLEFT", x = 20, y = -20 },
     targetPos = { point = "TOPLEFT", x = 260, y = -20 },
@@ -53,6 +54,14 @@ local defaults = {
     petShowDebuffs = true,
     hidePlayerPermanentBuffs = false,  -- Hide player buffs without timers
     hideTargetPermanentBuffs = false,  -- Hide target buffs without timers
+    playerDebuffFilter = "HARMFUL",
+    targetDebuffFilter = "HARMFUL",
+    focusDebuffFilter  = "HARMFUL|RAID",
+    totDebuffFilter    = "HARMFUL|RAID",
+    petDebuffFilter    = "HARMFUL",
+    partyDebuffFilter  = "HARMFUL|RAID",
+    playerMaxDebuffs = 40,
+    targetMaxDebuffs = 40,
     showPartyFrames = true,
     partyPos = { point = "TOPLEFT", x = 20, y = -300 },
     partyWidth = 150,
@@ -66,6 +75,97 @@ local partyFrames = {}
 
 -- Lookup table for player's units (used to avoid secret value comparison errors)
 local myUnits = { player = true, pet = true, vehicle = true }
+
+-- Item level display: request inspect on target change, show result when ready
+local pendingInspect = false
+
+local EQUIP_SLOTS = { 1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17 }
+local function CalcInspectItemLevel(unit)
+    local total, count = 0, 0
+    for _, slot in ipairs(EQUIP_SLOTS) do
+        local link = GetInventoryItemLink(unit, slot)
+        if link then
+            local ilvl = GetDetailedItemLevelInfo(link)
+            if ilvl and ilvl > 0 then
+                total = total + ilvl
+                count = count + 1
+            end
+        end
+    end
+    if count > 0 then return math.floor(total / count + 0.5) end
+    return nil
+end
+
+local function ShowIlvl(ilvl)
+    if not targetFrame or not targetFrame.ilvlText then return end
+    if ilvl and ilvl > 0 and JarUnitFramesDB.showTargetItemLevel then
+        targetFrame.ilvlText:SetText("ilvl " .. ilvl)
+        targetFrame.ilvlText:Show()
+    else
+        targetFrame.ilvlText:Hide()
+    end
+end
+
+local function RequestTargetItemLevel()
+    if not JarUnitFramesDB.showTargetItemLevel then return end
+    if not UnitExists("target") or not UnitIsPlayer("target") then return end
+    if not CanInspect("target") then return end
+    if InspectFrame and InspectFrame:IsShown() then return end
+    pendingInspect = true
+    NotifyInspect("target")
+end
+
+local function TryReadInspectIlvl(attempt)
+    if not pendingInspect then return end
+    if not UnitExists("target") or not UnitIsPlayer("target") then
+        pendingInspect = false
+        return
+    end
+    local ilvl = C_PaperDollInfo and C_PaperDollInfo.GetInspectItemLevel
+        and C_PaperDollInfo.GetInspectItemLevel("target")
+    if not ilvl or ilvl <= 0 then
+        ilvl = CalcInspectItemLevel("target")
+    end
+    if ilvl and ilvl > 0 then
+        pendingInspect = false
+        ShowIlvl(ilvl)
+    elseif attempt < 4 then
+        C_Timer.After(0.5 * attempt, function() TryReadInspectIlvl(attempt + 1) end)
+    else
+        pendingInspect = false
+    end
+end
+
+local function OnInspectReady()
+    if not pendingInspect then return end
+    TryReadInspectIlvl(1)
+end
+
+-- Debuff filter presets for config dropdowns
+local DEBUFF_FILTER_PRESETS = {
+    { label = "All Debuffs",       value = "HARMFUL" },
+    { label = "Raid-Relevant",     value = "HARMFUL|RAID" },
+    { label = "Not Self",          value = "HARMFUL|NOT_SELF" },
+}
+
+-- Sort auras so isBossAura comes first (uses pcall to safely read secret boolean)
+local function SafeIsBoss(aura)
+    local ok, val = pcall(function() if aura.isBossAura then return true else return false end end)
+    return ok and val
+end
+
+local function SortBossAurasFirst(auras)
+    for i = 1, #auras do
+        auras[i]._boss = SafeIsBoss(auras[i]) and 1 or 0
+    end
+    table.sort(auras, function(a, b)
+        if a._boss ~= b._boss then return a._boss > b._boss end
+        return false
+    end)
+    for i = 1, #auras do
+        auras[i]._boss = nil
+    end
+end
 
 -- Available textures
 local TEXTURES = {
@@ -553,10 +653,13 @@ local function CreateTargetFrame()
     frame:RegisterEvent("UNIT_AURA")
     frame:RegisterEvent("PLAYER_TARGET_CHANGED")
     frame:RegisterEvent("PLAYER_ENTERING_WORLD")
+    frame:RegisterEvent("INSPECT_READY")
     
     -- Set up event handler
     frame:SetScript("OnEvent", function(self, event, eventUnit)
-        if event == "UNIT_AURA" and eventUnit == "target" then
+        if event == "INSPECT_READY" then
+            OnInspectReady(eventUnit)  -- eventUnit is the GUID for INSPECT_READY
+        elseif event == "UNIT_AURA" and eventUnit == "target" then
             UpdateTargetBuffs()
             UpdateTargetDebuffs()
         elseif event:match("^UNIT_") then
@@ -567,6 +670,7 @@ local function CreateTargetFrame()
             UpdateTargetFrame()
             UpdateTargetBuffs()
             UpdateTargetDebuffs()
+            RequestTargetItemLevel()
         end
     end)
     
@@ -695,6 +799,13 @@ local function CreateTargetFrame()
     frame.name:SetPoint("TOPRIGHT", frame.powerBar, "BOTTOMRIGHT", 0, -5)
     frame.name:SetJustifyH("RIGHT")
     frame.name:SetText("No Target")
+
+    -- Item level text (below the frame, left side)
+    frame.ilvlText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    frame.ilvlText:SetPoint("TOPLEFT", frame.powerBar, "BOTTOMLEFT", 0, -5)
+    frame.ilvlText:SetJustifyH("LEFT")
+    frame.ilvlText:SetTextColor(0.6, 0.8, 1.0)
+    frame.ilvlText:Hide()
     
     -- Buff container (above the frame)
     frame.buffs = {}
@@ -1877,14 +1988,7 @@ function UpdatePlayerBuffs()
             buff.count:SetText(C_UnitAuras.GetAuraApplicationDisplayCount("player", auraData.auraInstanceID, 2, 99))
             
             -- Update cooldown spiral
-            if buff.cooldown and auraData.duration and auraData.expirationTime then
-                if C_StringUtil.TruncateWhenZero(auraData.duration) then
-                    buff.cooldown:SetCooldownFromExpirationTime(auraData.expirationTime, auraData.duration)
-                    buff.cooldown:Show()
-                else
-                    buff.cooldown:Hide()
-                end
-            end
+            if buff.cooldown then buff.cooldown:Hide() end
 
             buff:Show()
             buffIndex = buffIndex + 1
@@ -1932,14 +2036,7 @@ function UpdateTargetBuffs()
             buff.count:SetText(C_UnitAuras.GetAuraApplicationDisplayCount("target", auraData.auraInstanceID, 2, 99))
 
             -- Update cooldown spiral
-            if buff.cooldown and auraData.duration and auraData.expirationTime then
-                if C_StringUtil.TruncateWhenZero(auraData.duration) then
-                    buff.cooldown:SetCooldownFromExpirationTime(auraData.expirationTime, auraData.duration)
-                    buff.cooldown:Show()
-                else
-                    buff.cooldown:Hide()
-                end
-            end
+            if buff.cooldown then buff.cooldown:Hide() end
             
             buff:Show()
             buffIndex = buffIndex + 1
@@ -1956,12 +2053,14 @@ end
 function UpdatePlayerDebuffs()
     if not playerFrame or not playerFrame.debuffs then return end
     
-    -- Use GetUnitAuras for harmful effects
-    local auras = C_UnitAuras.GetUnitAuras("player", "HARMFUL", 40) or {}
+    local filter = JarUnitFramesDB.playerDebuffFilter or "HARMFUL"
+    local maxShow = JarUnitFramesDB.playerMaxDebuffs or 40
+    local auras = C_UnitAuras.GetUnitAuras("player", filter, 40) or {}
+    SortBossAurasFirst(auras)
     local debuffIndex = 1
     
     for _, auraData in ipairs(auras) do
-        if debuffIndex > 40 then break end
+        if debuffIndex > maxShow then break end
         
         local debuff = playerFrame.debuffs[debuffIndex]
         debuff.icon:SetTexture(auraData.icon)
@@ -1971,14 +2070,7 @@ function UpdatePlayerDebuffs()
         debuff.count:SetText(C_UnitAuras.GetAuraApplicationDisplayCount("player", auraData.auraInstanceID, 2, 99))
 
         -- Update cooldown spiral
-        if debuff.cooldown and auraData.duration and auraData.expirationTime then
-            if C_StringUtil.TruncateWhenZero(auraData.duration) then
-                debuff.cooldown:SetCooldownFromExpirationTime(auraData.expirationTime, auraData.duration)
-                debuff.cooldown:Show()
-            else
-                debuff.cooldown:Hide()
-            end
-        end
+        if debuff.cooldown then debuff.cooldown:Hide() end
 
         debuff:Show()
         debuffIndex = debuffIndex + 1
@@ -2002,12 +2094,14 @@ function UpdateTargetDebuffs()
         return
     end
 
-    -- Use GetUnitAuras for harmful effects
-    local auras = C_UnitAuras.GetUnitAuras("target", "HARMFUL", 40) or {}
+    local filter = JarUnitFramesDB.targetDebuffFilter or "HARMFUL"
+    local maxShow = JarUnitFramesDB.targetMaxDebuffs or 40
+    local auras = C_UnitAuras.GetUnitAuras("target", filter, 40) or {}
+    SortBossAurasFirst(auras)
     local debuffIndex = 1
 
     for _, auraData in ipairs(auras) do
-        if debuffIndex > 40 then break end
+        if debuffIndex > maxShow then break end
 
         local debuff = targetFrame.debuffs[debuffIndex]
         debuff.icon:SetTexture(auraData.icon)
@@ -2017,14 +2111,7 @@ function UpdateTargetDebuffs()
         debuff.count:SetText(C_UnitAuras.GetAuraApplicationDisplayCount("target", auraData.auraInstanceID, 2, 99))
 
         -- Update cooldown spiral
-        if debuff.cooldown and auraData.duration and auraData.expirationTime then
-            if C_StringUtil.TruncateWhenZero(auraData.duration) then
-                debuff.cooldown:SetCooldownFromExpirationTime(auraData.expirationTime, auraData.duration)
-                debuff.cooldown:Show()
-            else
-                debuff.cooldown:Hide()
-            end
-        end
+        if debuff.cooldown then debuff.cooldown:Hide() end
         
         debuff:Show()
         debuffIndex = debuffIndex + 1
@@ -2120,6 +2207,11 @@ function UpdateTargetFrame()
         targetFrame.levelText:SetText(UnitLevel("target"))
     else
         targetFrame.levelText:SetText("")
+    end
+
+    -- Update item level display (only show cached value on retarget; fresh request fires separately)
+    if not (UnitExists("target") and UnitIsPlayer("target")) then
+        ShowIlvl(nil)
     end
     
     -- Get health values (secret)
@@ -2224,7 +2316,9 @@ function UpdateFocusDebuffs()
         return
     end
     
-    local auras = C_UnitAuras.GetUnitAuras("focus", "HARMFUL", 40) or {}
+    local filter = JarUnitFramesDB.focusDebuffFilter or "HARMFUL|RAID"
+    local auras = C_UnitAuras.GetUnitAuras("focus", filter, 40) or {}
+    SortBossAurasFirst(auras)
     local debuffIndex = 1
     
     for _, auraData in ipairs(auras) do
@@ -2364,7 +2458,9 @@ function UpdateTargetTargetDebuffs()
         return
     end
     
-    local auras = C_UnitAuras.GetUnitAuras("targettarget", "HARMFUL", 20) or {}
+    local filter = JarUnitFramesDB.totDebuffFilter or "HARMFUL|RAID"
+    local auras = C_UnitAuras.GetUnitAuras("targettarget", filter, 20) or {}
+    SortBossAurasFirst(auras)
     local debuffIndex = 1
     
     for _, auraData in ipairs(auras) do
@@ -2503,7 +2599,9 @@ function UpdatePetDebuffs()
         return
     end
     
-    local auras = C_UnitAuras.GetUnitAuras("pet", "HARMFUL", 20) or {}
+    local filter = JarUnitFramesDB.petDebuffFilter or "HARMFUL"
+    local auras = C_UnitAuras.GetUnitAuras("pet", filter, 20) or {}
+    SortBossAurasFirst(auras)
     local debuffIndex = 1
     
     for _, auraData in ipairs(auras) do
@@ -2742,14 +2840,7 @@ function UpdatePartyBuffs(partyNum)
         buff.count:SetText(C_UnitAuras.GetAuraApplicationDisplayCount(unit, auraData.auraInstanceID, 2, 99))
         
         -- Update cooldown
-        local duration = auraData.duration
-        local expirationTime = auraData.expirationTime
-        
-        if duration and C_StringUtil.TruncateWhenZero(duration) then
-            buff.cooldown:SetCooldownFromExpirationTime(expirationTime, duration)
-        else
-            buff.cooldown:Clear()
-        end
+        if buff.cooldown then buff.cooldown:Hide() end
         
         buff:Show()
         buffIndex = buffIndex + 1
@@ -2776,7 +2867,9 @@ function UpdatePartyDebuffs(partyNum)
         return
     end
     
-    local auras = C_UnitAuras.GetUnitAuras(unit, "HARMFUL", 15) or {}
+    local filter = JarUnitFramesDB.partyDebuffFilter or "HARMFUL|RAID"
+    local auras = C_UnitAuras.GetUnitAuras(unit, filter, 15) or {}
+    SortBossAurasFirst(auras)
     local debuffIndex = 1
     
     for _, auraData in ipairs(auras) do
@@ -2790,14 +2883,7 @@ function UpdatePartyDebuffs(partyNum)
         debuff.count:SetText(C_UnitAuras.GetAuraApplicationDisplayCount(unit, auraData.auraInstanceID, 2, 99))
         
         -- Update cooldown
-        local duration = auraData.duration
-        local expirationTime = auraData.expirationTime
-        
-        if duration and C_StringUtil.TruncateWhenZero(duration) then
-            debuff.cooldown:SetCooldownFromExpirationTime(expirationTime, duration)
-        else
-            debuff.cooldown:Clear()
-        end
+        if debuff.cooldown then debuff.cooldown:Hide() end
         
         debuff:Show()
         debuffIndex = debuffIndex + 1
@@ -2809,107 +2895,10 @@ function UpdatePartyDebuffs(partyNum)
     end
 end
 
--- Modern UI Helper Functions
-local function CreateModernSlider(parent, label, minVal, maxVal, step, getValue, setValue)
-    local slider = CreateFrame("Slider", nil, parent, "MinimalSliderTemplate")
-    slider:SetSize(200, 18)
-    slider:SetMinMaxValues(minVal, maxVal)
-    slider:SetValueStep(step)
-    slider:SetObeyStepOnDrag(true)
-    
-    local bg = slider:CreateTexture(nil, "BACKGROUND")
-    bg:SetAllPoints()
-    bg:SetColorTexture(0.05, 0.05, 0.05, 0.8)
-    
-    local fill = slider:CreateTexture(nil, "ARTWORK")
-    fill:SetHeight(4)
-    fill:SetPoint("LEFT")
-    fill:SetColorTexture(UI_PALETTE.accent[1], UI_PALETTE.accent[2], UI_PALETTE.accent[3], 0.6)
-    slider.fill = fill
-    
-    slider:SetThumbTexture("Interface\\Buttons\\WHITE8X8")
-    local thumb = slider:GetThumbTexture()
-    thumb:SetSize(14, 14)
-    thumb:SetColorTexture(UI_PALETTE.accent[1], UI_PALETTE.accent[2], UI_PALETTE.accent[3], 1)
-    
-    local labelText = slider:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    labelText:SetPoint("BOTTOM", slider, "TOP", 0, 4)
-    labelText:SetTextColor(UI_PALETTE.text[1], UI_PALETTE.text[2], UI_PALETTE.text[3])
-    slider.label = labelText
-    
-    local function updateLabel()
-        local value = getValue()
-        labelText:SetText(label .. ": " .. value)
-        local pct = (value - minVal) / (maxVal - minVal)
-        fill:SetWidth(slider:GetWidth() * pct)
-    end
-    
-    slider:SetScript("OnValueChanged", function(self, value)
-        setValue(value)
-        updateLabel()
-    end)
-    
-    updateLabel()
-    return slider
-end
-
-local function CreateModernCheck(parent, label, getValue, setValue)
-    local check = CreateFrame("CheckButton", nil, parent)
-    check:SetSize(18, 18)
-    
-    local bg = check:CreateTexture(nil, "BACKGROUND")
-    bg:SetAllPoints()
-    bg:SetColorTexture(0.05, 0.05, 0.05, 0.9)
-    
-    local border = check:CreateTexture(nil, "BORDER")
-    border:SetPoint("TOPLEFT", -1, 1)
-    border:SetPoint("BOTTOMRIGHT", 1, -1)
-    border:SetColorTexture(UI_PALETTE.border[1], UI_PALETTE.border[2], UI_PALETTE.border[3], 1)
-    
-    local checkTex = check:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    checkTex:SetPoint("CENTER", 0, 0)
-    checkTex:SetText("✓")
-    checkTex:SetTextColor(UI_PALETTE.accent[1], UI_PALETTE.accent[2], UI_PALETTE.accent[3], 1)
-    check.checkTex = checkTex
-    
-    local labelText = check:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    labelText:SetPoint("LEFT", check, "RIGHT", 8, 0)
-    labelText:SetText(label)
-    labelText:SetTextColor(UI_PALETTE.text[1], UI_PALETTE.text[2], UI_PALETTE.text[3])
-    check.text = labelText
-    
-    local function updateCheck()
-        checkTex:SetShown(getValue())
-    end
-    
-    check:SetScript("OnClick", function()
-        setValue(not getValue())
-        updateCheck()
-    end)
-    
-    updateCheck()
-    return check
-end
-
-local function CreateSectionHeader(parent, text)
-    local header = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    header:SetTextColor(UI_PALETTE.accent[1], UI_PALETTE.accent[2], UI_PALETTE.accent[3], 1)
-    header:SetText(text:upper())
-    
-    local line = parent:CreateTexture(nil, "ARTWORK")
-    line:SetHeight(1)
-    line:SetPoint("LEFT", header, "RIGHT", 8, 0)
-    line:SetColorTexture(UI_PALETTE.accent[1], UI_PALETTE.accent[2], UI_PALETTE.accent[3], 0.3)
-    line:SetWidth(100)
-    
-    header.line = line
-    return header
-end
-
 -- Create config window
 local function CreateConfigFrame()
     local frame = CreateFrame("Frame", "JUF_ConfigFrame", UIParent, "BackdropTemplate")
-    frame:SetSize(600, 700)
+    frame:SetSize(480, 680)
     frame:SetPoint("CENTER")
     frame:Hide()
     frame:SetMovable(true)
@@ -2917,750 +2906,419 @@ local function CreateConfigFrame()
     frame:RegisterForDrag("LeftButton")
     frame:SetScript("OnDragStart", frame.StartMoving)
     frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
-    
-    -- Modern background
     frame:SetBackdrop(modernBackdrop)
     frame:SetBackdropColor(unpack(UI_PALETTE.bg))
     frame:SetBackdropBorderColor(unpack(UI_PALETTE.border))
-    
-    -- Title bar with teal accent
+
+    -- Title bar
     local titleBar = frame:CreateTexture(nil, "OVERLAY")
     titleBar:SetPoint("TOPLEFT", 1, -1)
     titleBar:SetPoint("TOPRIGHT", -1, -1)
     titleBar:SetHeight(32)
-    titleBar:SetColorTexture(UI_PALETTE.header[1], UI_PALETTE.header[2], UI_PALETTE.header[3], UI_PALETTE.header[4])
-    
+    titleBar:SetColorTexture(unpack(UI_PALETTE.header))
+
     local titleAccent = frame:CreateTexture(nil, "OVERLAY")
-    titleAccent:SetPoint("TOPLEFT", titleBar, "BOTTOMLEFT", 0, 0)
-    titleAccent:SetPoint("TOPRIGHT", titleBar, "BOTTOMRIGHT", 0, 0)
+    titleAccent:SetPoint("TOPLEFT", titleBar, "BOTTOMLEFT")
+    titleAccent:SetPoint("TOPRIGHT", titleBar, "BOTTOMRIGHT")
     titleAccent:SetHeight(2)
-    titleAccent:SetColorTexture(UI_PALETTE.accent[1], UI_PALETTE.accent[2], UI_PALETTE.accent[3], UI_PALETTE.accent[4])
-    
+    titleAccent:SetColorTexture(unpack(UI_PALETTE.accent))
+
     frame.title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     frame.title:SetPoint("TOP", titleBar, "TOP", 0, -8)
     frame.title:SetText("Jar's Unit Frames Config")
-    frame.title:SetTextColor(UI_PALETTE.text[1], UI_PALETTE.text[2], UI_PALETTE.text[3])
-    
-    -- Modern close button
+    frame.title:SetTextColor(unpack(UI_PALETTE.text))
+
+    -- Close button
     local closeBtn = CreateFrame("Button", nil, frame)
     closeBtn:SetSize(20, 20)
     closeBtn:SetPoint("TOPRIGHT", -6, -6)
-    closeBtn:SetNormalTexture("Interface\\AddOns\\JarsUnitFrames\\Assets\\close")
-    closeBtn:SetHighlightTexture("Interface\\AddOns\\JarsUnitFrames\\Assets\\close")
-    closeBtn:GetHighlightTexture():SetAlpha(0.3)
     local closeBtnBg = closeBtn:CreateTexture(nil, "BACKGROUND")
     closeBtnBg:SetAllPoints()
     closeBtnBg:SetColorTexture(0.05, 0.05, 0.05, 0.8)
     local closeBtnText = closeBtn:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     closeBtnText:SetPoint("CENTER", 0, 1)
-    closeBtnText:SetText("✕")
-    closeBtnText:SetTextColor(UI_PALETTE.textDim[1], UI_PALETTE.textDim[2], UI_PALETTE.textDim[3])
-    closeBtn:SetScript("OnEnter", function(self)
-        closeBtnText:SetTextColor(UI_PALETTE.accent[1], UI_PALETTE.accent[2], UI_PALETTE.accent[3])
-    end)
-    closeBtn:SetScript("OnLeave", function(self)
-        closeBtnText:SetTextColor(UI_PALETTE.textDim[1], UI_PALETTE.textDim[2], UI_PALETTE.textDim[3])
-    end)
+    closeBtnText:SetText("\195\151")
+    closeBtnText:SetTextColor(unpack(UI_PALETTE.textDim))
+    closeBtn:SetScript("OnEnter", function() closeBtnText:SetTextColor(unpack(UI_PALETTE.accent)) end)
+    closeBtn:SetScript("OnLeave", function() closeBtnText:SetTextColor(unpack(UI_PALETTE.textDim)) end)
     closeBtn:SetScript("OnClick", function() frame:Hide() end)
-    
-    -- Remove old drag registration and add it after backdrop setup
-    
-    -- Unlock frames checkbox
-    local unlockCheck = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
-    unlockCheck:SetPoint("TOPLEFT", 20, -35)
-    unlockCheck.text = unlockCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    unlockCheck.text:SetPoint("LEFT", unlockCheck, "RIGHT", 5, 0)
-    unlockCheck.text:SetText("Unlock Frames (drag to reposition)")
-    unlockCheck:SetChecked(JarUnitFramesDB.unlocked)
-    unlockCheck:SetScript("OnClick", function(self)
-        JarUnitFramesDB.unlocked = self:GetChecked()
-        if JarUnitFramesDB.unlocked then
-            print("|cff00ff00Jar's Unit Frames|r Frames unlocked - Shift+drag party frames to reposition")
-            -- Show unlock borders on party frames
-            for i = 1, 4 do
-                if partyFrames[i] and partyFrames[i].unlockBorder then
-                    partyFrames[i].unlockBorder:Show()
-                end
-            end
-        else
-            print("|cff00ff00Jar's Unit Frames|r Frames locked")
-            -- Hide unlock borders on party frames
-            for i = 1, 4 do
-                if partyFrames[i] and partyFrames[i].unlockBorder then
-                    partyFrames[i].unlockBorder:Hide()
-                end
-            end
-        end
-    end)
-    frame.unlockCheck = unlockCheck
-    
-    -- Show level checkbox
-    local showLevelCheck = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
-    showLevelCheck:SetPoint("TOPLEFT", 20, -60)
-    showLevelCheck.text = showLevelCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    showLevelCheck.text:SetPoint("LEFT", showLevelCheck, "RIGHT", 5, 0)
-    showLevelCheck.text:SetText("Show Level")
-    showLevelCheck:SetChecked(JarUnitFramesDB.showLevel)
-    showLevelCheck:SetScript("OnClick", function(self)
-        JarUnitFramesDB.showLevel = self:GetChecked()
-        UpdatePlayerFrame()
-        UpdateTargetFrame()
-    end)
-    frame.showLevelCheck = showLevelCheck
-    
-    -- Scale slider
-    local scaleSlider = CreateFrame("Slider", nil, frame, "OptionsSliderTemplate")
-    scaleSlider:SetPoint("TOPLEFT", 20, -210)
-    scaleSlider:SetMinMaxValues(0.5, 2.0)
-    scaleSlider:SetValue(JarUnitFramesDB.frameScale)
-    scaleSlider:SetValueStep(0.1)
-    scaleSlider:SetObeyStepOnDrag(true)
-    scaleSlider:SetWidth(200)
-    scaleSlider.Text = scaleSlider:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    scaleSlider.Text:SetPoint("BOTTOM", scaleSlider, "TOP", 0, 5)
-    scaleSlider.Text:SetText("Frame Scale: " .. JarUnitFramesDB.frameScale)
-    scaleSlider:SetScript("OnValueChanged", function(self, value)
-        value = math.floor(value * 10 + 0.5) / 10  -- Round to 1 decimal
-        JarUnitFramesDB.frameScale = value
-        self.Text:SetText("Frame Scale: " .. value)
-        if playerFrame then
-            playerFrame:SetScale(value)
-        end
-        if targetFrame then
-            targetFrame:SetScale(value)
-        end
-        if focusFrame then
-            focusFrame:SetScale(value)
-        end
-        if targetTargetFrame then
-            targetTargetFrame:SetScale(value)
-        end
-        if petFrame then
-            petFrame:SetScale(value)
-        end
-    end)
-    frame.scaleSlider = scaleSlider
-    
-    -- Hide Player Permanent Buffs checkbox (top right)
-    local hidePlayerPermBuffsCheck = CreateFrame("CheckButton", "JARUNITFRAMESHidePlayerPermBuffsCheck", frame, "UICheckButtonTemplate")
-    hidePlayerPermBuffsCheck:SetPoint("TOPRIGHT", -20, -35)
-    hidePlayerPermBuffsCheck.text = hidePlayerPermBuffsCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    hidePlayerPermBuffsCheck.text:SetPoint("RIGHT", hidePlayerPermBuffsCheck, "LEFT", -5, 0)
-    hidePlayerPermBuffsCheck.text:SetText("Hide Player Permanent Buffs")
-    hidePlayerPermBuffsCheck:SetChecked(JarUnitFramesDB.hidePlayerPermanentBuffs)
-    hidePlayerPermBuffsCheck:SetScript("OnClick", function(self)
-        JarUnitFramesDB.hidePlayerPermanentBuffs = self:GetChecked()
-        UpdatePlayerBuffs()
-    end)
-    
-    -- Hide Target Permanent Buffs checkbox (top right)
-    local hideTargetPermBuffsCheck = CreateFrame("CheckButton", "JARUNITFRAMESHideTargetPermBuffsCheck", frame, "UICheckButtonTemplate")
-    hideTargetPermBuffsCheck:SetPoint("TOPRIGHT", -20, -60)
-    hideTargetPermBuffsCheck.text = hideTargetPermBuffsCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    hideTargetPermBuffsCheck.text:SetPoint("RIGHT", hideTargetPermBuffsCheck, "LEFT", -5, 0)
-    hideTargetPermBuffsCheck.text:SetText("Hide Target Permanent Buffs")
-    hideTargetPermBuffsCheck:SetChecked(JarUnitFramesDB.hideTargetPermanentBuffs)
-    hideTargetPermBuffsCheck:SetScript("OnClick", function(self)
-        JarUnitFramesDB.hideTargetPermanentBuffs = self:GetChecked()
-        UpdateTargetBuffs()
-    end)
-    
-    -- Mirror Target Position checkbox
-    local mirrorCheck = CreateFrame("CheckButton", "JARUNITFRAMESMirrorCheck", frame, "UICheckButtonTemplate")
-    mirrorCheck:SetPoint("TOPLEFT", showLevelCheck, "BOTTOMLEFT", 0, -10)
-    mirrorCheck.text = mirrorCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    mirrorCheck.text:SetPoint("LEFT", mirrorCheck, "RIGHT", 5, 0)
-    mirrorCheck.text:SetText("Mirror Target Frame Position")
-    mirrorCheck:SetChecked(JarUnitFramesDB.mirrorTargetPosition)
-    mirrorCheck:SetScript("OnClick", function(self)
-        JarUnitFramesDB.mirrorTargetPosition = self:GetChecked()
-        
-        -- Apply mirrored positioning immediately if enabled
-        if JarUnitFramesDB.mirrorTargetPosition and playerFrame and targetFrame then
-            local point = JarUnitFramesDB.playerPos.point
-            local x = JarUnitFramesDB.playerPos.x
-            local y = JarUnitFramesDB.playerPos.y
-            local mirroredX = -x
-            local mirroredY = y
-            -- Use the same anchor point, just flip the X coordinate
-            local mirroredPoint = point
-            
-            JarUnitFramesDB.targetPos.point = mirroredPoint
-            JarUnitFramesDB.targetPos.x = mirroredX
-            JarUnitFramesDB.targetPos.y = mirroredY
-            
-            targetFrame:ClearAllPoints()
-            targetFrame:SetPoint(mirroredPoint, UIParent, mirroredPoint, mirroredX, mirroredY)
-        end
-    end)
-    frame.mirrorCheck = mirrorCheck
-    
-    -- Buff/Debuff tooltip on hover checkbox
-    local auraTooltipCheck = CreateFrame("CheckButton", "JARUNITFRAMESAuraTooltipCheck", frame, "UICheckButtonTemplate")
-    auraTooltipCheck:SetPoint("TOPLEFT", mirrorCheck, "BOTTOMLEFT", 0, -10)
-    auraTooltipCheck.text = auraTooltipCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    auraTooltipCheck.text:SetPoint("LEFT", auraTooltipCheck, "RIGHT", 5, 0)
-    auraTooltipCheck.text:SetText("Show Buff/Debuff Tooltips on Hover")
-    auraTooltipCheck:SetChecked(JarUnitFramesDB.enableAuraTooltips)
-    auraTooltipCheck:SetScript("OnClick", function(self)
-        JarUnitFramesDB.enableAuraTooltips = self:GetChecked()
-        if JarUnitFramesDB.enableAuraTooltips then
-            print("|cff00ff00Jar's Unit Frames|r Buff/debuff tooltips |cff00ff00enabled|r.")
-        else
-            print("|cff00ff00Jar's Unit Frames|r Buff/debuff tooltips |cffff4444disabled|r.")
-        end
-    end)
-    frame.auraTooltipCheck = auraTooltipCheck
-    local showFocusCheck = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
-    showFocusCheck:SetPoint("TOPRIGHT", hideTargetPermBuffsCheck, "BOTTOMRIGHT", 0, -10)
-    showFocusCheck.text = showFocusCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    showFocusCheck.text:SetPoint("RIGHT", showFocusCheck, "LEFT", -5, 0)
-    showFocusCheck.text:SetText("Show Focus Frame")
-    showFocusCheck:SetChecked(JarUnitFramesDB.showFocusFrame)
-    showFocusCheck:SetScript("OnClick", function(self)
-        JarUnitFramesDB.showFocusFrame = self:GetChecked()
-        if JarUnitFramesDB.showFocusFrame then
-            if not focusFrame then
-                focusFrame = CreateFocusFrame()
-                UpdateFocusFrame()
-                UpdateFocusBuffs()
-                UpdateFocusDebuffs()
-            else
-                focusFrame:Show()
-            end
-        else
-            if focusFrame then
-                focusFrame:Hide()
-            end
-        end
-    end)
-    frame.showFocusCheck = showFocusCheck
-    
-    -- Focus Show Buffs checkbox (indented, right side)
-    local focusShowBuffsCheck = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
-    focusShowBuffsCheck:SetPoint("TOPRIGHT", showFocusCheck, "BOTTOMRIGHT", -20, -5)
-    focusShowBuffsCheck.text = focusShowBuffsCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    focusShowBuffsCheck.text:SetPoint("RIGHT", focusShowBuffsCheck, "LEFT", -5, 0)
-    focusShowBuffsCheck.text:SetText("Show Focus Buffs")
-    focusShowBuffsCheck:SetChecked(JarUnitFramesDB.focusShowBuffs)
-    focusShowBuffsCheck:SetScript("OnClick", function(self)
-        JarUnitFramesDB.focusShowBuffs = self:GetChecked()
-        if focusFrame and focusFrame.buffs then
-            if JarUnitFramesDB.focusShowBuffs then
-                UpdateFocusBuffs()
-            else
-                for i = 1, 40 do
-                    focusFrame.buffs[i]:Hide()
-                end
-            end
-        end
-    end)
-    frame.focusShowBuffsCheck = focusShowBuffsCheck
-    
-    -- Focus Show Debuffs checkbox (indented, right side)
-    local focusShowDebuffsCheck = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
-    focusShowDebuffsCheck:SetPoint("TOPRIGHT", focusShowBuffsCheck, "BOTTOMRIGHT", 0, -5)
-    focusShowDebuffsCheck.text = focusShowDebuffsCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    focusShowDebuffsCheck.text:SetPoint("RIGHT", focusShowDebuffsCheck, "LEFT", -5, 0)
-    focusShowDebuffsCheck.text:SetText("Show Focus Debuffs")
-    focusShowDebuffsCheck:SetChecked(JarUnitFramesDB.focusShowDebuffs)
-    focusShowDebuffsCheck:SetScript("OnClick", function(self)
-        JarUnitFramesDB.focusShowDebuffs = self:GetChecked()
-        if focusFrame and focusFrame.debuffs then
-            if JarUnitFramesDB.focusShowDebuffs then
-                UpdateFocusDebuffs()
-            else
-                for i = 1, 40 do
-                    focusFrame.debuffs[i]:Hide()
-                end
-            end
-        end
-    end)
-    frame.focusShowDebuffsCheck = focusShowDebuffsCheck
-    
-    -- Focus Width slider (right side)
-    local focusWidthSlider = CreateFrame("Slider", nil, frame, "OptionsSliderTemplate")
-    focusWidthSlider:SetPoint("TOPRIGHT", focusShowDebuffsCheck, "BOTTOMRIGHT", 20, -15)
-    focusWidthSlider:SetMinMaxValues(150, 300)
-    focusWidthSlider:SetValue(JarUnitFramesDB.focusWidth or 220)
-    focusWidthSlider:SetValueStep(10)
-    focusWidthSlider:SetObeyStepOnDrag(true)
-    focusWidthSlider:SetWidth(200)
-    focusWidthSlider.Text = focusWidthSlider:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    focusWidthSlider.Text:SetPoint("BOTTOM", focusWidthSlider, "TOP", 0, 5)
-    focusWidthSlider.Text:SetText("Focus Width: " .. (JarUnitFramesDB.focusWidth or 220))
-    focusWidthSlider:SetScript("OnValueChanged", function(self, value)
-        value = math.floor(value / 10 + 0.5) * 10
-        JarUnitFramesDB.focusWidth = value
-        self.Text:SetText("Focus Width: " .. value)
-        if focusFrame then
-            focusFrame:SetWidth(value)
-            focusFrame.healthBar:SetWidth(value)
-            focusFrame.powerBar:SetWidth(value)
-            if focusFrame.buffContainer then
-                focusFrame.buffContainer:SetWidth(value)
-            end
-            if focusFrame.debuffContainer then
-                focusFrame.debuffContainer:SetWidth(value)
-            end
-        end
-    end)
-    frame.focusWidthSlider = focusWidthSlider
-    
-    -- Show Target of Target Frame checkbox (right side)
-    local showToTCheck = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
-    showToTCheck:SetPoint("TOPRIGHT", focusWidthSlider, "BOTTOMRIGHT", 0, -25)
-    showToTCheck.text = showToTCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    showToTCheck.text:SetPoint("RIGHT", showToTCheck, "LEFT", -5, 0)
-    showToTCheck.text:SetText("Show Target of Target Frame")
-    showToTCheck:SetChecked(JarUnitFramesDB.showTargetTargetFrame)
-    showToTCheck:SetScript("OnClick", function(self)
-        JarUnitFramesDB.showTargetTargetFrame = self:GetChecked()
-        if JarUnitFramesDB.showTargetTargetFrame then
-            if not targetTargetFrame then
-                targetTargetFrame = CreateTargetTargetFrame()
-                UpdateTargetTargetFrame()
-                if JarUnitFramesDB.totShowBuffs then UpdateTargetTargetBuffs() end
-                if JarUnitFramesDB.totShowDebuffs then UpdateTargetTargetDebuffs() end
-            else
-                -- Re-enable unit watch
-                if not InCombatLockdown() then
-                    RegisterUnitWatch(targetTargetFrame)
-                end
-                targetTargetFrame:Show()
-            end
-        else
-            if targetTargetFrame then
-                -- Unregister unit watch to prevent auto-show
-                if not InCombatLockdown() then
-                    UnregisterUnitWatch(targetTargetFrame)
-                end
-                targetTargetFrame:Hide()
-            end
-        end
-    end)
-    frame.showToTCheck = showToTCheck
-    
-    -- ToT Show Buffs checkbox (indented, right side)
-    local totShowBuffsCheck = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
-    totShowBuffsCheck:SetPoint("TOPRIGHT", showToTCheck, "BOTTOMRIGHT", -20, -5)
-    totShowBuffsCheck.text = totShowBuffsCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    totShowBuffsCheck.text:SetPoint("RIGHT", totShowBuffsCheck, "LEFT", -5, 0)
-    totShowBuffsCheck.text:SetText("Show ToT Buffs")
-    totShowBuffsCheck:SetChecked(JarUnitFramesDB.totShowBuffs)
-    totShowBuffsCheck:SetScript("OnClick", function(self)
-        JarUnitFramesDB.totShowBuffs = self:GetChecked()
-        if targetTargetFrame and targetTargetFrame.buffs then
-            if JarUnitFramesDB.totShowBuffs then
-                UpdateTargetTargetBuffs()
-            else
-                for i = 1, 20 do
-                    targetTargetFrame.buffs[i]:Hide()
-                end
-            end
-        end
-    end)
-    frame.totShowBuffsCheck = totShowBuffsCheck
-    
-    -- ToT Show Debuffs checkbox (indented, right side)
-    local totShowDebuffsCheck = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
-    totShowDebuffsCheck:SetPoint("TOPRIGHT", totShowBuffsCheck, "BOTTOMRIGHT", 0, -5)
-    totShowDebuffsCheck.text = totShowDebuffsCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    totShowDebuffsCheck.text:SetPoint("RIGHT", totShowDebuffsCheck, "LEFT", -5, 0)
-    totShowDebuffsCheck.text:SetText("Show ToT Debuffs")
-    totShowDebuffsCheck:SetChecked(JarUnitFramesDB.totShowDebuffs)
-    totShowDebuffsCheck:SetScript("OnClick", function(self)
-        JarUnitFramesDB.totShowDebuffs = self:GetChecked()
-        if targetTargetFrame and targetTargetFrame.debuffs then
-            if JarUnitFramesDB.totShowDebuffs then
-                UpdateTargetTargetDebuffs()
-            else
-                for i = 1, 20 do
-                    targetTargetFrame.debuffs[i]:Hide()
-                end
-            end
-        end
-    end)
-    frame.totShowDebuffsCheck = totShowDebuffsCheck
-    
-    -- ToT Width slider (right side)
-    local totWidthSlider = CreateFrame("Slider", nil, frame, "OptionsSliderTemplate")
-    totWidthSlider:SetPoint("TOPRIGHT", totShowDebuffsCheck, "BOTTOMRIGHT", 20, -15)
-    totWidthSlider:SetMinMaxValues(100, 250)
-    totWidthSlider:SetValue(JarUnitFramesDB.totWidth or 150)
-    totWidthSlider:SetValueStep(10)
-    totWidthSlider:SetObeyStepOnDrag(true)
-    totWidthSlider:SetWidth(200)
-    totWidthSlider.Text = totWidthSlider:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    totWidthSlider.Text:SetPoint("BOTTOM", totWidthSlider, "TOP", 0, 5)
-    totWidthSlider.Text:SetText("ToT Width: " .. (JarUnitFramesDB.totWidth or 150))
-    totWidthSlider:SetScript("OnValueChanged", function(self, value)
-        value = math.floor(value / 10 + 0.5) * 10
-        JarUnitFramesDB.totWidth = value
-        self.Text:SetText("ToT Width: " .. value)
-        if targetTargetFrame then
-            targetTargetFrame:SetWidth(value)
-            targetTargetFrame.healthBar:SetWidth(value)
-            targetTargetFrame.powerBar:SetWidth(value)
-            if targetTargetFrame.buffContainer then
-                targetTargetFrame.buffContainer:SetWidth(value)
-            end
-            if targetTargetFrame.debuffContainer then
-                targetTargetFrame.debuffContainer:SetWidth(value)
-            end
-        end
-    end)
-    frame.totWidthSlider = totWidthSlider
-    
-    -- Show Pet Frame checkbox (right side)
-    local showPetCheck = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
-    showPetCheck:SetPoint("TOPRIGHT", totWidthSlider, "BOTTOMRIGHT", 0, -25)
-    showPetCheck.text = showPetCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    showPetCheck.text:SetPoint("RIGHT", showPetCheck, "LEFT", -5, 0)
-    showPetCheck.text:SetText("Show Pet Frame")
-    showPetCheck:SetChecked(JarUnitFramesDB.showPetFrame)
-    showPetCheck:SetScript("OnClick", function(self)
-        JarUnitFramesDB.showPetFrame = self:GetChecked()
-        if JarUnitFramesDB.showPetFrame then
-            if not petFrame then
-                petFrame = CreatePetFrame()
-                UpdatePetFrame()
-                if JarUnitFramesDB.petShowBuffs then UpdatePetBuffs() end
-                if JarUnitFramesDB.petShowDebuffs then UpdatePetDebuffs() end
-            else
-                petFrame:Show()
-            end
-        else
-            if petFrame then
-                petFrame:Hide()
-            end
-        end
-    end)
-    frame.showPetCheck = showPetCheck
-    
-    -- Pet Show Buffs checkbox (indented, right side)
-    local petShowBuffsCheck = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
-    petShowBuffsCheck:SetPoint("TOPRIGHT", showPetCheck, "BOTTOMRIGHT", -20, -5)
-    petShowBuffsCheck.text = petShowBuffsCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    petShowBuffsCheck.text:SetPoint("RIGHT", petShowBuffsCheck, "LEFT", -5, 0)
-    petShowBuffsCheck.text:SetText("Show Pet Buffs")
-    petShowBuffsCheck:SetChecked(JarUnitFramesDB.petShowBuffs)
-    petShowBuffsCheck:SetScript("OnClick", function(self)
-        JarUnitFramesDB.petShowBuffs = self:GetChecked()
-        if petFrame and petFrame.buffs then
-            if JarUnitFramesDB.petShowBuffs then
-                UpdatePetBuffs()
-            else
-                for i = 1, 20 do
-                    petFrame.buffs[i]:Hide()
-                end
-            end
-        end
-    end)
-    frame.petShowBuffsCheck = petShowBuffsCheck
-    
-    -- Pet Show Debuffs checkbox (indented, right side)
-    local petShowDebuffsCheck = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
-    petShowDebuffsCheck:SetPoint("TOPRIGHT", petShowBuffsCheck, "BOTTOMRIGHT", 0, -5)
-    petShowDebuffsCheck.text = petShowDebuffsCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    petShowDebuffsCheck.text:SetPoint("RIGHT", petShowDebuffsCheck, "LEFT", -5, 0)
-    petShowDebuffsCheck.text:SetText("Show Pet Debuffs")
-    petShowDebuffsCheck:SetChecked(JarUnitFramesDB.petShowDebuffs)
-    petShowDebuffsCheck:SetScript("OnClick", function(self)
-        JarUnitFramesDB.petShowDebuffs = self:GetChecked()
-        if petFrame and petFrame.debuffs then
-            if JarUnitFramesDB.petShowDebuffs then
-                UpdatePetDebuffs()
-            else
-                for i = 1, 20 do
-                    petFrame.debuffs[i]:Hide()
-                end
-            end
-        end
-    end)
-    frame.petShowDebuffsCheck = petShowDebuffsCheck
-    
-    -- Pet Width slider (right side)
-    local petWidthSlider = CreateFrame("Slider", nil, frame, "OptionsSliderTemplate")
-    petWidthSlider:SetPoint("TOPRIGHT", petShowDebuffsCheck, "BOTTOMRIGHT", 20, -15)
-    petWidthSlider:SetMinMaxValues(100, 250)
-    petWidthSlider:SetValue(JarUnitFramesDB.petWidth or 150)
-    petWidthSlider:SetValueStep(10)
-    petWidthSlider:SetObeyStepOnDrag(true)
-    petWidthSlider:SetWidth(200)
-    petWidthSlider.Text = petWidthSlider:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    petWidthSlider.Text:SetPoint("BOTTOM", petWidthSlider, "TOP", 0, 5)
-    petWidthSlider.Text:SetText("Pet Width: " .. (JarUnitFramesDB.petWidth or 150))
-    petWidthSlider:SetScript("OnValueChanged", function(self, value)
-        value = math.floor(value / 10 + 0.5) * 10
-        JarUnitFramesDB.petWidth = value
-        self.Text:SetText("Pet Width: " .. value)
-        if petFrame then
-            petFrame:SetWidth(value)
-            petFrame.healthBar:SetWidth(value)
-            petFrame.powerBar:SetWidth(value)
-            if petFrame.buffContainer then
-                petFrame.buffContainer:SetWidth(value)
-            end
-            if petFrame.debuffContainer then
-                petFrame.debuffContainer:SetWidth(value)
-            end
-        end
-    end)
-    frame.petWidthSlider = petWidthSlider
-    
-    -- Background transparency slider
-    local bgAlphaSlider = CreateFrame("Slider", nil, frame, "OptionsSliderTemplate")
-    bgAlphaSlider:SetPoint("TOPLEFT", scaleSlider, "BOTTOMLEFT", 0, -50)
-    bgAlphaSlider:SetMinMaxValues(0.0, 1.0)
-    bgAlphaSlider:SetValueStep(0.05)
-    bgAlphaSlider:SetObeyStepOnDrag(true)
-    bgAlphaSlider:SetWidth(200)
-    bgAlphaSlider.Low:SetText("0%")
-    bgAlphaSlider.High:SetText("100%")
-    bgAlphaSlider.Text:SetText("Background Opacity: " .. math.floor(JarUnitFramesDB.bgAlpha * 100) .. "%")
-    bgAlphaSlider:SetValue(JarUnitFramesDB.bgAlpha)
-    bgAlphaSlider:SetScript("OnValueChanged", function(self, value)
-        value = math.floor(value * 20 + 0.5) / 20  -- Round to 0.05 increments
-        JarUnitFramesDB.bgAlpha = value
-        self.Text:SetText("Background Opacity: " .. math.floor(value * 100) .. "%")
-        -- Update drop shadow transparency on all frames
-        if playerFrame then
-            playerFrame.shadow:SetColorTexture(0, 0, 0, value)
-        end
-        if targetFrame then
-            targetFrame.shadow:SetColorTexture(0, 0, 0, value)
-        end
-        if focusFrame then
-            focusFrame.shadow:SetColorTexture(0, 0, 0, value)
-        end
-        if targetTargetFrame then
-            targetTargetFrame.shadow:SetColorTexture(0, 0, 0, value)
-        end
-        if petFrame then
-            petFrame.shadow:SetColorTexture(0, 0, 0, value)
-        end
-        -- Update party frames
-        for i = 1, 4 do
-            if partyFrames[i] and partyFrames[i].shadow then
-                partyFrames[i].shadow:SetColorTexture(0, 0, 0, value)
-            end
-        end
-    end)
-    frame.bgAlphaSlider = bgAlphaSlider
-    
-    -- Texture selection dropdown
-    local textureLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    textureLabel:SetPoint("TOPLEFT", bgAlphaSlider, "BOTTOMLEFT", 0, -30)
-    textureLabel:SetText("Bar Texture:")
-    
-    -- Get current texture name
-    local function GetCurrentTextureName()
-        for name, path in pairs(TEXTURES) do
-            if path == JarUnitFramesDB.texture then
-                return name
-            end
-        end
-        return "Blizzard"
+
+    -- Scroll frame
+    local scrollFrame = CreateFrame("ScrollFrame", nil, frame, "UIPanelScrollFrameTemplate")
+    scrollFrame:SetPoint("TOPLEFT", 12, -38)
+    scrollFrame:SetPoint("BOTTOMRIGHT", -28, 8)
+
+    local content = CreateFrame("Frame", nil, scrollFrame)
+    content:SetWidth(420)
+    scrollFrame:SetScrollChild(content)
+
+    -- Layout state
+    local W = 420
+    local PAD = 10
+    local yOff = 0
+
+    local function NextY(gap) yOff = yOff - gap; return yOff end
+
+    local function AddHeader(text)
+        NextY(30)
+        local hdr = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        hdr:SetPoint("TOPLEFT", PAD, yOff)
+        hdr:SetTextColor(unpack(UI_PALETTE.accent))
+        hdr:SetText(text:upper())
+        local line = content:CreateTexture(nil, "ARTWORK")
+        line:SetHeight(1)
+        line:SetPoint("LEFT", hdr, "RIGHT", 8, 0)
+        line:SetPoint("RIGHT", content, "RIGHT", -PAD, 0)
+        line:SetColorTexture(UI_PALETTE.accent[1], UI_PALETTE.accent[2], UI_PALETTE.accent[3], 0.3)
+        NextY(14)
     end
 
-    local textureDropdown = CreateFrame("DropdownButton", nil, frame, "WowStyle1DropdownTemplate")
-    textureDropdown:SetPoint("TOPLEFT", textureLabel, "BOTTOMLEFT", 0, -5)
-    textureDropdown:SetWidth(180)
-    textureDropdown:SetDefaultText(GetCurrentTextureName())
-    textureDropdown:SetupMenu(function(_, rootDescription)
+    local function AddCheck(text, getVal, setVal)
+        NextY(28)
+        local chk = CreateFrame("CheckButton", nil, content, "UICheckButtonTemplate")
+        chk:SetPoint("TOPLEFT", PAD, yOff)
+        chk.text = chk:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        chk.text:SetPoint("LEFT", chk, "RIGHT", 5, 0)
+        chk.text:SetText(text)
+        chk:SetChecked(getVal())
+        chk:SetScript("OnClick", function(self) setVal(self:GetChecked()) end)
+        return chk
+    end
+
+    local function AddSlider(label, minV, maxV, step, getVal, setVal, fmtFunc)
+        NextY(42)
+        local slider = CreateFrame("Slider", nil, content, "OptionsSliderTemplate")
+        slider:SetPoint("TOPLEFT", PAD + 10, yOff)
+        slider:SetWidth(W - PAD * 2 - 20)
+        slider:SetMinMaxValues(minV, maxV)
+        slider:SetValueStep(step)
+        slider:SetObeyStepOnDrag(true)
+        slider:SetValue(getVal())
+        slider.Text = slider:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        slider.Text:SetPoint("BOTTOM", slider, "TOP", 0, 4)
+        local display = fmtFunc and fmtFunc(getVal()) or tostring(getVal())
+        slider.Text:SetText(label .. ": " .. display)
+        slider:SetScript("OnValueChanged", function(self, value)
+            local v = fmtFunc and fmtFunc(value) or value
+            if type(v) == "string" then v = tonumber(v) end
+            setVal(v)
+            self.Text:SetText(label .. ": " .. tostring(v))
+        end)
+        NextY(18)
+        return slider
+    end
+
+    local function AddDropdown(label, width, getText, setupMenu)
+        NextY(28)
+        local lbl = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        lbl:SetPoint("TOPLEFT", PAD, yOff)
+        lbl:SetText(label)
+        lbl:SetTextColor(unpack(UI_PALETTE.text))
+        NextY(24)
+        local dd = CreateFrame("DropdownButton", nil, content, "WowStyle1DropdownTemplate")
+        dd:SetPoint("TOPLEFT", PAD + 10, yOff)
+        dd:SetWidth(width)
+        dd:SetDefaultText(getText())
+        dd:SetupMenu(setupMenu)
+        NextY(8)
+        return dd
+    end
+
+    local function AddFilterCycler(label, dbKey, updateFunc)
+        NextY(28)
+        local lbl = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        lbl:SetPoint("TOPLEFT", PAD + 10, yOff)
+        lbl:SetText(label)
+        lbl:SetTextColor(unpack(UI_PALETTE.text))
+        local btn = CreateFrame("Button", nil, content, "BackdropTemplate")
+        btn:SetSize(160, 20)
+        btn:SetPoint("LEFT", lbl, "RIGHT", 8, 0)
+        btn:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8", edgeFile = "Interface\\Buttons\\WHITE8X8", edgeSize = 1 })
+        btn:SetBackdropColor(0.14, 0.14, 0.17, 1)
+        btn:SetBackdropBorderColor(unpack(UI_PALETTE.border))
+        btn.text = btn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        btn.text:SetPoint("CENTER")
+        local curVal = JarUnitFramesDB[dbKey] or "HARMFUL"
+        for _, p in ipairs(DEBUFF_FILTER_PRESETS) do
+            if p.value == curVal then btn.text:SetText(p.label); break end
+        end
+        if not btn.text:GetText() or btn.text:GetText() == "" then btn.text:SetText(curVal) end
+        btn:SetScript("OnEnter", function(self) self:SetBackdropColor(0.20, 0.20, 0.24, 1) end)
+        btn:SetScript("OnLeave", function(self) self:SetBackdropColor(0.14, 0.14, 0.17, 1) end)
+        btn:SetScript("OnClick", function(self)
+            local cur = JarUnitFramesDB[dbKey] or "HARMFUL"
+            local ni = 1
+            for idx, p in ipairs(DEBUFF_FILTER_PRESETS) do
+                if p.value == cur then ni = (idx % #DEBUFF_FILTER_PRESETS) + 1; break end
+            end
+            local nxt = DEBUFF_FILTER_PRESETS[ni]
+            JarUnitFramesDB[dbKey] = nxt.value
+            self.text:SetText(nxt.label)
+            if updateFunc then updateFunc() end
+        end)
+    end
+
+    -- ═══════════════════════════════════════════════
+    --  GENERAL
+    -- ═══════════════════════════════════════════════
+    AddHeader("General")
+    AddCheck("Unlock Frames (drag to reposition)",
+        function() return JarUnitFramesDB.unlocked end,
+        function(v) JarUnitFramesDB.unlocked = v
+            for i = 1, 4 do if partyFrames[i] and partyFrames[i].unlockBorder then partyFrames[i].unlockBorder:SetShown(v) end end
+        end)
+    AddCheck("Show Level",
+        function() return JarUnitFramesDB.showLevel end,
+        function(v) JarUnitFramesDB.showLevel = v; UpdatePlayerFrame(); UpdateTargetFrame() end)
+    AddCheck("Mirror Target Frame Position",
+        function() return JarUnitFramesDB.mirrorTargetPosition end,
+        function(v) JarUnitFramesDB.mirrorTargetPosition = v
+            if v and playerFrame and targetFrame then
+                local p = JarUnitFramesDB.playerPos
+                JarUnitFramesDB.targetPos = { point = p.point, x = -p.x, y = p.y }
+                targetFrame:ClearAllPoints()
+                targetFrame:SetPoint(p.point, UIParent, p.point, -p.x, p.y)
+            end
+        end)
+    AddCheck("Show Buff/Debuff Tooltips on Hover",
+        function() return JarUnitFramesDB.enableAuraTooltips end,
+        function(v) JarUnitFramesDB.enableAuraTooltips = v end)
+    AddCheck("Show Target Item Level",
+        function() return JarUnitFramesDB.showTargetItemLevel end,
+        function(v) JarUnitFramesDB.showTargetItemLevel = v
+            if targetFrame and targetFrame.ilvlText then
+                if v then RequestTargetItemLevel(); UpdateTargetFrame()
+                else targetFrame.ilvlText:Hide() end
+            end
+        end)
+    AddSlider("Frame Scale", 0.5, 2.0, 0.1,
+        function() return JarUnitFramesDB.frameScale end,
+        function(v)
+            v = math.floor(v * 10 + 0.5) / 10
+            JarUnitFramesDB.frameScale = v
+            if playerFrame then playerFrame:SetScale(v) end
+            if targetFrame then targetFrame:SetScale(v) end
+            if focusFrame then focusFrame:SetScale(v) end
+            if targetTargetFrame then targetTargetFrame:SetScale(v) end
+            if petFrame then petFrame:SetScale(v) end
+        end,
+        function(v) return math.floor(v * 10 + 0.5) / 10 end)
+    AddSlider("Background Opacity", 0, 100, 5,
+        function() return math.floor(JarUnitFramesDB.bgAlpha * 100) end,
+        function(v)
+            local alpha = v / 100
+            JarUnitFramesDB.bgAlpha = alpha
+            local frames = { playerFrame, targetFrame, focusFrame, targetTargetFrame, petFrame }
+            for _, f in ipairs(frames) do if f and f.shadow then f.shadow:SetColorTexture(0, 0, 0, alpha) end end
+            for i = 1, 4 do if partyFrames[i] and partyFrames[i].shadow then partyFrames[i].shadow:SetColorTexture(0, 0, 0, alpha) end end
+        end,
+        function(v) return math.floor(v + 0.5) end)
+
+    -- ═══════════════════════════════════════════════
+    --  APPEARANCE
+    -- ═══════════════════════════════════════════════
+    AddHeader("Appearance")
+    local function GetCurrentTextureName()
+        for name, path in pairs(TEXTURES) do if path == JarUnitFramesDB.texture then return name end end
+        return "Blizzard"
+    end
+    AddDropdown("Bar Texture", 220, GetCurrentTextureName, function(_, root)
         for name, path in pairs(TEXTURES) do
-            rootDescription:CreateRadio(name,
+            root:CreateRadio(name,
                 function() return JarUnitFramesDB.texture == path end,
                 function()
                     JarUnitFramesDB.texture = path
-                    if playerFrame then
-                        UpdateFrameTextures(playerFrame)
-                    end
-                    if targetFrame then
-                        UpdateFrameTextures(targetFrame)
-                    end
-                    print("|cff00ff00Jar's Unit Frames|r Texture changed to " .. name)
+                    if playerFrame then UpdateFrameTextures(playerFrame) end
+                    if targetFrame then UpdateFrameTextures(targetFrame) end
                 end)
         end
     end)
-    frame.textureDropdown = textureDropdown
-    
-    -- Font selection dropdown
-    local fontLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    fontLabel:SetPoint("TOPLEFT", textureLabel, "BOTTOMLEFT", 0, -45)
-    fontLabel:SetText("Font:")
-    
-    -- Get current font name
     local function GetCurrentFontName()
-        for name, path in pairs(FONTS) do
-            if path == JarUnitFramesDB.font then
-                return name
-            end
-        end
+        for name, path in pairs(FONTS) do if path == JarUnitFramesDB.font then return name end end
         return "Friz Quadrata (Default)"
     end
-
-    local fontDropdown = CreateFrame("DropdownButton", nil, frame, "WowStyle1DropdownTemplate")
-    fontDropdown:SetPoint("TOPLEFT", fontLabel, "BOTTOMLEFT", 0, -5)
-    fontDropdown:SetWidth(180)
-    fontDropdown:SetDefaultText(GetCurrentFontName())
-    fontDropdown:SetupMenu(function(_, rootDescription)
+    AddDropdown("Font", 220, GetCurrentFontName, function(_, root)
         for name, path in pairs(FONTS) do
-            rootDescription:CreateRadio(name,
+            root:CreateRadio(name,
                 function() return JarUnitFramesDB.font == path end,
                 function()
                     JarUnitFramesDB.font = path
-                    if playerFrame then
-                        UpdateFrameFonts(playerFrame)
-                    end
-                    if targetFrame then
-                        UpdateFrameFonts(targetFrame)
-                    end
-                    print("|cff00ff00Jar's Unit Frames|r Font changed to " .. name)
+                    if playerFrame then UpdateFrameFonts(playerFrame) end
+                    if targetFrame then UpdateFrameFonts(targetFrame) end
                 end)
         end
     end)
-    
-    -- Party Frames Section (left side, under font)
-    local partyHeader = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    partyHeader:SetPoint("TOPLEFT", fontLabel, "BOTTOMLEFT", 0, -60)
-    partyHeader:SetText("Party Frames")
-    
-    -- Show Party Frames checkbox
-    local showPartyCheck = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
-    showPartyCheck:SetPoint("TOPLEFT", partyHeader, "BOTTOMLEFT", 0, -10)
-    showPartyCheck.text = showPartyCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    showPartyCheck.text:SetPoint("LEFT", showPartyCheck, "RIGHT", 5, 0)
-    showPartyCheck.text:SetText("Show Party Frames")
-    showPartyCheck:SetChecked(JarUnitFramesDB.showPartyFrames)
-    showPartyCheck:SetScript("OnClick", function(self)
-        JarUnitFramesDB.showPartyFrames = self:GetChecked()
-        if JarUnitFramesDB.showPartyFrames then
-            -- Hide Blizzard party frames
-            if CompactRaidFrameManager then
-                CompactRaidFrameManager:UnregisterAllEvents()
-                CompactRaidFrameManager:Hide()
-            end
-            if CompactPartyFrame then
-                CompactPartyFrame:UnregisterAllEvents()
-                CompactPartyFrame:Hide()
-            end
-            if CompactRaidFrameContainer then
-                CompactRaidFrameContainer:UnregisterAllEvents()
-                CompactRaidFrameContainer:Hide()
-            end
-            
-            -- Create party frames if they don't exist
-            if not partyFrames[1] then
-                for i = 1, 4 do
-                    partyFrames[i] = CreatePartyFrame(i)
-                end
-                RepositionPartyFrames()
-                -- Do initial updates
-                for i = 1, 4 do
-                    UpdatePartyFrame(i)
-                    UpdatePartyBuffs(i)
-                    UpdatePartyDebuffs(i)
+
+    -- ═══════════════════════════════════════════════
+    --  BUFFS & DEBUFFS
+    -- ═══════════════════════════════════════════════
+    AddHeader("Buffs & Debuffs")
+    local filterSub = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    filterSub:SetPoint("TOPLEFT", PAD, yOff)
+    filterSub:SetTextColor(unpack(UI_PALETTE.textDim))
+    filterSub:SetText("Debuff Filters  (click to cycle)")
+    NextY(8)
+    AddFilterCycler("Player:", "playerDebuffFilter", UpdatePlayerDebuffs)
+    AddFilterCycler("Target:", "targetDebuffFilter", UpdateTargetDebuffs)
+    AddFilterCycler("Focus:",  "focusDebuffFilter",  UpdateFocusDebuffs)
+    AddFilterCycler("Party:",  "partyDebuffFilter",  function() for i=1,4 do UpdatePartyDebuffs(i) end end)
+    NextY(10)
+    AddSlider("Player Max Debuffs", 5, 40, 1,
+        function() return JarUnitFramesDB.playerMaxDebuffs or 40 end,
+        function(v) JarUnitFramesDB.playerMaxDebuffs = v; UpdatePlayerDebuffs() end,
+        function(v) return math.floor(v + 0.5) end)
+    AddSlider("Target Max Debuffs", 5, 40, 1,
+        function() return JarUnitFramesDB.targetMaxDebuffs or 40 end,
+        function(v) JarUnitFramesDB.targetMaxDebuffs = v; UpdateTargetDebuffs() end,
+        function(v) return math.floor(v + 0.5) end)
+
+    -- ═══════════════════════════════════════════════
+    --  FOCUS FRAME
+    -- ═══════════════════════════════════════════════
+    AddHeader("Focus Frame")
+    AddCheck("Show Focus Frame",
+        function() return JarUnitFramesDB.showFocusFrame end,
+        function(v) JarUnitFramesDB.showFocusFrame = v
+            if v then
+                if not focusFrame then focusFrame = CreateFocusFrame(); UpdateFocusFrame(); UpdateFocusBuffs(); UpdateFocusDebuffs()
+                else focusFrame:Show() end
+            else if focusFrame then focusFrame:Hide() end end
+        end)
+    AddCheck("Show Focus Buffs",
+        function() return JarUnitFramesDB.focusShowBuffs end,
+        function(v) JarUnitFramesDB.focusShowBuffs = v
+            if focusFrame and focusFrame.buffs then if v then UpdateFocusBuffs() else for i=1,40 do focusFrame.buffs[i]:Hide() end end end
+        end)
+    AddCheck("Show Focus Debuffs",
+        function() return JarUnitFramesDB.focusShowDebuffs end,
+        function(v) JarUnitFramesDB.focusShowDebuffs = v
+            if focusFrame and focusFrame.debuffs then if v then UpdateFocusDebuffs() else for i=1,40 do focusFrame.debuffs[i]:Hide() end end end
+        end)
+    AddSlider("Focus Width", 150, 300, 10,
+        function() return JarUnitFramesDB.focusWidth or 220 end,
+        function(v) v = math.floor(v / 10 + 0.5) * 10; JarUnitFramesDB.focusWidth = v
+            if focusFrame then focusFrame:SetWidth(v); focusFrame.healthBar:SetWidth(v); focusFrame.powerBar:SetWidth(v) end
+        end,
+        function(v) return math.floor(v / 10 + 0.5) * 10 end)
+
+    -- ═══════════════════════════════════════════════
+    --  TARGET OF TARGET
+    -- ═══════════════════════════════════════════════
+    AddHeader("Target of Target")
+    AddCheck("Show Target of Target Frame",
+        function() return JarUnitFramesDB.showTargetTargetFrame end,
+        function(v) JarUnitFramesDB.showTargetTargetFrame = v
+            if v then
+                if not targetTargetFrame then
+                    targetTargetFrame = CreateTargetTargetFrame(); UpdateTargetTargetFrame()
+                    if JarUnitFramesDB.totShowBuffs then UpdateTargetTargetBuffs() end
+                    if JarUnitFramesDB.totShowDebuffs then UpdateTargetTargetDebuffs() end
+                else
+                    if not InCombatLockdown() then RegisterUnitWatch(targetTargetFrame) end
+                    targetTargetFrame:Show()
                 end
             else
-                -- Frames exist, just enable them by triggering updates
-                for i = 1, 4 do
-                    if partyFrames[i] and not InCombatLockdown() then
-                        RegisterUnitWatch(partyFrames[i])
-                        UpdatePartyFrame(i)
-                        UpdatePartyBuffs(i)
-                        UpdatePartyDebuffs(i)
-                    end
+                if targetTargetFrame then
+                    if not InCombatLockdown() then UnregisterUnitWatch(targetTargetFrame) end
+                    targetTargetFrame:Hide()
                 end
             end
-            print("|cff00ff00Jar's Unit Frames|r Party frames enabled")
-        else
-            -- Unregister unit watch and hide custom party frames
-            for i = 1, 4 do
-                if partyFrames[i] then
-                    if not InCombatLockdown() then
-                        UnregisterUnitWatch(partyFrames[i])
-                    end
-                    partyFrames[i]:Hide()
-                end
-            end
-            -- Re-enable Blizzard party frames
-            if CompactRaidFrameManager then
-                CompactRaidFrameManager_OnLoad(CompactRaidFrameManager)
-                CompactRaidFrameManager:Show()
-            end
-            if CompactPartyFrame then
-                CompactPartyFrame:Show()
-            end
-            if CompactRaidFrameContainer then
-                CompactRaidFrameContainer:Show()
-            end
-            print("|cff00ff00Jar's Unit Frames|r Party frames disabled, Blizzard frames restored")
-        end
-    end)
-    frame.showPartyCheck = showPartyCheck
-    
-    -- Show Only My Buffs checkbox
-    local partyOnlyMyBuffsCheck = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
-    partyOnlyMyBuffsCheck:SetPoint("TOPLEFT", showPartyCheck, "BOTTOMLEFT", 0, -10)
-    partyOnlyMyBuffsCheck.text = partyOnlyMyBuffsCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    partyOnlyMyBuffsCheck.text:SetPoint("LEFT", partyOnlyMyBuffsCheck, "RIGHT", 5, 0)
-    partyOnlyMyBuffsCheck.text:SetText("Show Only My Buffs")
-    partyOnlyMyBuffsCheck:SetChecked(JarUnitFramesDB.partyShowOnlyMyBuffs)
-    partyOnlyMyBuffsCheck:SetScript("OnClick", function(self)
-        JarUnitFramesDB.partyShowOnlyMyBuffs = self:GetChecked()
-        -- Update all party frames to reflect the change
-        if JarUnitFramesDB.showPartyFrames then
-            for i = 1, 4 do
-                UpdatePartyBuffs(i)
-            end
-        end
-    end)
-    frame.partyOnlyMyBuffsCheck = partyOnlyMyBuffsCheck
-    
-    -- Party Width slider
-    local partyWidthSlider = CreateFrame("Slider", nil, frame, "OptionsSliderTemplate")
-    partyWidthSlider:SetPoint("TOPLEFT", partyOnlyMyBuffsCheck, "BOTTOMLEFT", 0, -20)
-    partyWidthSlider:SetMinMaxValues(100, 250)
-    partyWidthSlider:SetValue(JarUnitFramesDB.partyWidth or 150)
-    partyWidthSlider:SetValueStep(10)
-    partyWidthSlider:SetObeyStepOnDrag(true)
-    partyWidthSlider:SetWidth(200)
-    partyWidthSlider.Text = partyWidthSlider:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    partyWidthSlider.Text:SetPoint("BOTTOM", partyWidthSlider, "TOP", 0, 5)
-    partyWidthSlider.Text:SetText("Party Width: " .. (JarUnitFramesDB.partyWidth or 150))
-    partyWidthSlider:SetScript("OnValueChanged", function(self, value)
-        value = math.floor(value / 10 + 0.5) * 10
-        JarUnitFramesDB.partyWidth = value
-        self.Text:SetText("Party Width: " .. value)
-        RepositionPartyFrames()
-    end)
-    frame.partyWidthSlider = partyWidthSlider
-    
-    -- Party Padding slider
-    local partyPaddingSlider = CreateFrame("Slider", nil, frame, "OptionsSliderTemplate")
-    partyPaddingSlider:SetPoint("TOPLEFT", partyWidthSlider, "BOTTOMLEFT", 0, -50)
-    partyPaddingSlider:SetMinMaxValues(0, 20)
-    partyPaddingSlider:SetValue(JarUnitFramesDB.partyPadding or 5)
-    partyPaddingSlider:SetValueStep(1)
-    partyPaddingSlider:SetObeyStepOnDrag(true)
-    partyPaddingSlider:SetWidth(200)
-    partyPaddingSlider.Text = partyPaddingSlider:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    partyPaddingSlider.Text:SetPoint("BOTTOM", partyPaddingSlider, "TOP", 0, 5)
-    partyPaddingSlider.Text:SetText("Party Padding: " .. (JarUnitFramesDB.partyPadding or 5))
-    partyPaddingSlider:SetScript("OnValueChanged", function(self, value)
-        value = math.floor(value + 0.5)
-        JarUnitFramesDB.partyPadding = value
-        self.Text:SetText("Party Padding: " .. value)
-        RepositionPartyFrames()
-    end)
-    frame.partyPaddingSlider = partyPaddingSlider
+        end)
+    AddCheck("Show ToT Buffs",
+        function() return JarUnitFramesDB.totShowBuffs end,
+        function(v) JarUnitFramesDB.totShowBuffs = v
+            if targetTargetFrame and targetTargetFrame.buffs then if v then UpdateTargetTargetBuffs() else for i=1,20 do targetTargetFrame.buffs[i]:Hide() end end end
+        end)
+    AddCheck("Show ToT Debuffs",
+        function() return JarUnitFramesDB.totShowDebuffs end,
+        function(v) JarUnitFramesDB.totShowDebuffs = v
+            if targetTargetFrame and targetTargetFrame.debuffs then if v then UpdateTargetTargetDebuffs() else for i=1,20 do targetTargetFrame.debuffs[i]:Hide() end end end
+        end)
+    AddSlider("ToT Width", 100, 250, 10,
+        function() return JarUnitFramesDB.totWidth or 150 end,
+        function(v) v = math.floor(v / 10 + 0.5) * 10; JarUnitFramesDB.totWidth = v
+            if targetTargetFrame then targetTargetFrame:SetWidth(v); targetTargetFrame.healthBar:SetWidth(v); targetTargetFrame.powerBar:SetWidth(v) end
+        end,
+        function(v) return math.floor(v / 10 + 0.5) * 10 end)
 
-    -- Close button is already provided by BasicFrameTemplateWithInset
-    frame:SetScript("OnHide", function()
-        -- Nothing needed
-    end)
+    -- ═══════════════════════════════════════════════
+    --  PET FRAME
+    -- ═══════════════════════════════════════════════
+    AddHeader("Pet Frame")
+    AddCheck("Show Pet Frame",
+        function() return JarUnitFramesDB.showPetFrame end,
+        function(v) JarUnitFramesDB.showPetFrame = v
+            if v then
+                if not petFrame then petFrame = CreatePetFrame(); UpdatePetFrame()
+                    if JarUnitFramesDB.petShowBuffs then UpdatePetBuffs() end
+                    if JarUnitFramesDB.petShowDebuffs then UpdatePetDebuffs() end
+                else petFrame:Show() end
+            else if petFrame then petFrame:Hide() end end
+        end)
+    AddCheck("Show Pet Buffs",
+        function() return JarUnitFramesDB.petShowBuffs end,
+        function(v) JarUnitFramesDB.petShowBuffs = v
+            if petFrame and petFrame.buffs then if v then UpdatePetBuffs() else for i=1,20 do petFrame.buffs[i]:Hide() end end end
+        end)
+    AddCheck("Show Pet Debuffs",
+        function() return JarUnitFramesDB.petShowDebuffs end,
+        function(v) JarUnitFramesDB.petShowDebuffs = v
+            if petFrame and petFrame.debuffs then if v then UpdatePetDebuffs() else for i=1,20 do petFrame.debuffs[i]:Hide() end end end
+        end)
+    AddSlider("Pet Width", 100, 250, 10,
+        function() return JarUnitFramesDB.petWidth or 150 end,
+        function(v) v = math.floor(v / 10 + 0.5) * 10; JarUnitFramesDB.petWidth = v
+            if petFrame then petFrame:SetWidth(v); petFrame.healthBar:SetWidth(v); petFrame.powerBar:SetWidth(v) end
+        end,
+        function(v) return math.floor(v / 10 + 0.5) * 10 end)
+
+    -- ═══════════════════════════════════════════════
+    --  PARTY FRAMES
+    -- ═══════════════════════════════════════════════
+    AddHeader("Party Frames")
+    AddCheck("Show Party Frames",
+        function() return JarUnitFramesDB.showPartyFrames end,
+        function(v) JarUnitFramesDB.showPartyFrames = v
+            if v then
+                if CompactRaidFrameManager then CompactRaidFrameManager:UnregisterAllEvents(); CompactRaidFrameManager:Hide() end
+                if CompactPartyFrame then CompactPartyFrame:UnregisterAllEvents(); CompactPartyFrame:Hide() end
+                if CompactRaidFrameContainer then CompactRaidFrameContainer:UnregisterAllEvents(); CompactRaidFrameContainer:Hide() end
+                if not partyFrames[1] then
+                    for i=1,4 do partyFrames[i] = CreatePartyFrame(i) end
+                    RepositionPartyFrames()
+                    for i=1,4 do UpdatePartyFrame(i); UpdatePartyBuffs(i); UpdatePartyDebuffs(i) end
+                else
+                    for i=1,4 do if partyFrames[i] and not InCombatLockdown() then
+                        RegisterUnitWatch(partyFrames[i]); UpdatePartyFrame(i); UpdatePartyBuffs(i); UpdatePartyDebuffs(i)
+                    end end
+                end
+            else
+                for i=1,4 do if partyFrames[i] then
+                    if not InCombatLockdown() then UnregisterUnitWatch(partyFrames[i]) end
+                    partyFrames[i]:Hide()
+                end end
+                if CompactRaidFrameManager then pcall(CompactRaidFrameManager_OnLoad, CompactRaidFrameManager); CompactRaidFrameManager:Show() end
+                if CompactPartyFrame then CompactPartyFrame:Show() end
+                if CompactRaidFrameContainer then CompactRaidFrameContainer:Show() end
+            end
+        end)
+    AddCheck("Show Only My Buffs",
+        function() return JarUnitFramesDB.partyShowOnlyMyBuffs end,
+        function(v) JarUnitFramesDB.partyShowOnlyMyBuffs = v; for i=1,4 do UpdatePartyBuffs(i) end end)
+    AddSlider("Party Width", 100, 250, 10,
+        function() return JarUnitFramesDB.partyWidth or 150 end,
+        function(v) v = math.floor(v / 10 + 0.5) * 10; JarUnitFramesDB.partyWidth = v; RepositionPartyFrames() end,
+        function(v) return math.floor(v / 10 + 0.5) * 10 end)
+    AddSlider("Party Padding", 0, 20, 1,
+        function() return JarUnitFramesDB.partyPadding or 5 end,
+        function(v) v = math.floor(v + 0.5); JarUnitFramesDB.partyPadding = v; RepositionPartyFrames() end,
+        function(v) return math.floor(v + 0.5) end)
+
+    -- Set scroll child height
+    NextY(20)
+    content:SetHeight(math.abs(yOff))
+
+    frame:SetScript("OnHide", function() end)
     
     return frame
 end
