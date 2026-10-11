@@ -1,4 +1,4 @@
--- Jar's Unit Frames for WoW 12.0.1
+-- Jar's Unit Frames for WoW 12.1.5
 -- Demonstrates proper handling of secret values for unit frame data
 
 -- Saved variables with defaults
@@ -77,7 +77,7 @@ local partyFrames = {}
 local myUnits = { player = true, pet = true, vehicle = true }
 
 -- Item level display: request inspect on target change, show result when ready
-local pendingInspect = false
+local pendingGUID
 
 local EQUIP_SLOTS = { 1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17 }
 local function CalcInspectItemLevel(unit)
@@ -85,7 +85,8 @@ local function CalcInspectItemLevel(unit)
     for _, slot in ipairs(EQUIP_SLOTS) do
         local link = GetInventoryItemLink(unit, slot)
         if link then
-            local ilvl = GetDetailedItemLevelInfo(link)
+            -- local ilvl = GetDetailedItemLevelInfo(link)
+            local ilvl = C_Item.GetDetailedItemLevelInfo(link)
             if ilvl and ilvl > 0 then
                 total = total + ilvl
                 count = count + 1
@@ -107,18 +108,26 @@ local function ShowIlvl(ilvl)
 end
 
 local function RequestTargetItemLevel()
+    pendingGUID = nil
     if not JarUnitFramesDB.showTargetItemLevel then return end
     if not UnitExists("target") or not UnitIsPlayer("target") then return end
     if not CanInspect("target") then return end
     if InspectFrame and InspectFrame:IsShown() then return end
-    pendingInspect = true
+    local guid = UnitGUID("target")
+    if issecretvalue(guid) then return end
+    pendingGUID = guid
     NotifyInspect("target")
 end
 
+-- still the same target we asked about?
+local function IsPendingTarget()
+    local guid = UnitGUID("target")
+    return pendingGUID and not issecretvalue(guid) and guid == pendingGUID
+end
+
 local function TryReadInspectIlvl(attempt)
-    if not pendingInspect then return end
-    if not UnitExists("target") or not UnitIsPlayer("target") then
-        pendingInspect = false
+    if not IsPendingTarget() then
+        pendingGUID = nil
         return
     end
     local ilvl = C_PaperDollInfo and C_PaperDollInfo.GetInspectItemLevel
@@ -127,17 +136,17 @@ local function TryReadInspectIlvl(attempt)
         ilvl = CalcInspectItemLevel("target")
     end
     if ilvl and ilvl > 0 then
-        pendingInspect = false
+        pendingGUID = nil
         ShowIlvl(ilvl)
     elseif attempt < 4 then
         C_Timer.After(0.5 * attempt, function() TryReadInspectIlvl(attempt + 1) end)
     else
-        pendingInspect = false
+        pendingGUID = nil
     end
 end
 
-local function OnInspectReady()
-    if not pendingInspect then return end
+local function OnInspectReady(guid)
+    if not pendingGUID or issecretvalue(guid) or guid ~= pendingGUID then return end
     TryReadInspectIlvl(1)
 end
 
@@ -145,27 +154,9 @@ end
 local DEBUFF_FILTER_PRESETS = {
     { label = "All Debuffs",       value = "HARMFUL" },
     { label = "Raid-Relevant",     value = "HARMFUL|RAID" },
-    { label = "Not Self",          value = "HARMFUL|NOT_SELF" },
+    -- { label = "Not Self",          value = "HARMFUL|NOT_SELF" },
+    { label = "Not Self",          value = "HARMFUL|!PLAYER" },
 }
-
--- Sort auras so isBossAura comes first (uses pcall to safely read secret boolean)
-local function SafeIsBoss(aura)
-    local ok, val = pcall(function() if aura.isBossAura then return true else return false end end)
-    return ok and val
-end
-
-local function SortBossAurasFirst(auras)
-    for i = 1, #auras do
-        auras[i]._boss = SafeIsBoss(auras[i]) and 1 or 0
-    end
-    table.sort(auras, function(a, b)
-        if a._boss ~= b._boss then return a._boss > b._boss end
-        return false
-    end)
-    for i = 1, #auras do
-        auras[i]._boss = nil
-    end
-end
 
 -- Available textures
 local TEXTURES = {
@@ -257,8 +248,24 @@ local function UpdateFrameTextures(frame)
     frame.powerBar.bg:SetTexture(texture)
 end
 
+-- saved font can point at a font pack thats not installed, SetFont errors on that now
+local DEFAULT_FONT = "Fonts\\FRIZQT__.TTF"
+local fontProbe, checkedFont
+local function GetSafeFont()
+    local font = JarUnitFramesDB.font or DEFAULT_FONT
+    if font == DEFAULT_FONT or font == checkedFont then return font end
+    fontProbe = fontProbe or UIParent:CreateFontString(nil, "OVERLAY")
+    if pcall(fontProbe.SetFont, fontProbe, font, 12, "") then
+        checkedFont = font
+        return font
+    end
+    print("|cff00ff00Jar's Unit Frames|r font not found, using default: " .. tostring(font))
+    JarUnitFramesDB.font = nil
+    return DEFAULT_FONT
+end
+
 local function UpdateFrameFonts(frame)
-    local font = JarUnitFramesDB.font or "Fonts\\FRIZQT__.TTF"
+    local font = GetSafeFont()
     local fontSize = JarUnitFramesDB.fontSize or 12
     
     -- Apply fonts directly
@@ -273,17 +280,242 @@ local function UpdateFrameFonts(frame)
     end
 end
 
+-- combat queue for anything touching secure frames
+local pending = {}
+local function RunWhenSafe(key, fn)
+    if InCombatLockdown() then pending[key] = fn else fn() end
+end
+
+local function FlushPending()
+    for key, fn in pairs(pending) do
+        pending[key] = nil
+        fn()
+    end
+end
+
+-- unit watch drives show/hide, we just turn it on or off
+local function SetFrameEnabled(frame, enabled)
+    if not frame then return end
+    RunWhenSafe(frame, function()
+        if enabled then
+            RegisterUnitWatch(frame)
+        else
+            UnregisterUnitWatch(frame)
+            frame:Hide()
+        end
+    end)
+end
+
+local UNIT_EVENTS = { "UNIT_HEALTH", "UNIT_MAXHEALTH", "UNIT_POWER_UPDATE", "UNIT_MAXPOWER", "UNIT_NAME_UPDATE", "UNIT_LEVEL" }
+local function RegisterUnitEvents(frame, unit)
+    for _, event in ipairs(UNIT_EVENTS) do
+        frame:RegisterUnitEvent(event, unit)
+    end
+end
+
+-- class can be secret in 12.1, dont use it as a key then
+local function GetUnitClassColor(unit)
+    local _, class = UnitClass(unit)
+    if issecretvalue(class) or not class then return end
+    return RAID_CLASS_COLORS[class]
+end
+
+local function ForEachUnitFrame(fn)
+    for _, f in pairs({ playerFrame, targetFrame, focusFrame, targetTargetFrame, petFrame }) do
+        fn(f)
+    end
+    for i = 1, 4 do
+        if partyFrames[i] then fn(partyFrames[i]) end
+    end
+end
+
+local function ApplyFrameScale()
+    RunWhenSafe("scale", function()
+        for _, f in pairs({ playerFrame, targetFrame, focusFrame, targetTargetFrame, petFrame }) do
+            f:SetScale(JarUnitFramesDB.frameScale)
+        end
+    end)
+end
+
+-- mirror around screen center, anchored to CENTER so it cant fly off screen
+local function MirrorTargetPosition()
+    if not playerFrame or not targetFrame then return end
+    RunWhenSafe("mirror", function()
+        local s = playerFrame:GetScale()
+        local cx, cy = playerFrame:GetCenter()
+        local ux, uy = UIParent:GetCenter()
+        JarUnitFramesDB.targetPos = { point = "CENTER", x = -(cx - ux / s), y = cy - uy / s }
+        RestoreFramePosition(targetFrame, JarUnitFramesDB.targetPos)
+    end)
+end
+
+-- 12.1 aura containers, one per buff/debuff row
+local auraContainersOK
+local function CanUseAuraContainers()
+    if auraContainersOK == nil then
+        auraContainersOK = select(4, GetBuildInfo()) >= 120100
+            and pcall(CreateFrame, "AuraContainer", nil, UIParent, "CustomAuraContainerTemplate") or false
+        if not auraContainersOK then
+            print("|cffff0000Jar's Unit Frames|r AuraContainer not available, buffs/debuffs are off")
+        end
+    end
+    return auraContainersOK
+end
+
+-- style each AuraButton once, cant touch them later while auras are secret
+local function NewAuraButtonInit(o)
+    return function(btn)
+        btn:SetSize(o.size, o.size)
+        btn:SetTooltipAnchorPoint(o.tooltip or "ANCHOR_RIGHT")
+        btn:EnableMouse(not o.isBuff or JarUnitFramesDB.enableAuraTooltips)
+
+        local icon = btn:CreateTexture(nil, "ARTWORK")
+        icon:SetAllPoints()
+        btn:SetIcon(icon)
+
+        if o.bordered then
+            icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+            local border = btn:CreateTexture(nil, "OVERLAY")
+            border:SetAllPoints()
+            border:SetTexture("Interface\\Buttons\\UI-Debuff-Overlays")
+            border:SetTexCoord(0.296875, 0.5703125, 0, 0.515625)
+        end
+
+        -- no cooldown spiral, same as before
+        if o.stacks then
+            local count = btn:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
+            count:SetPoint("BOTTOMRIGHT", 2, 0)
+            btn:SetApplicationCount(count, {})
+        end
+    end
+end
+
+-- boss first = a "boss" group then everything else
+local function CreateAuraRow(parent, o)
+    if not CanUseAuraContainers() then return end
+
+    local c = CreateFrame("AuraContainer", nil, parent, "CustomAuraContainerTemplate")
+    c:SetPoint(o.point, o.relTo, o.relPoint, o.x, o.y)
+    c:SetFlowLayoutAnchorPoint(o.point)
+    c:SetFlowLayoutGrowthDirection(o.growX, o.growY)
+    c:SetFlowLayoutMaximumLineSize(o.perRow * (o.size + 2))
+    c.isBuff = o.isBuff
+    c.groups = o.bossFirst and { "boss", "auras" } or { "auras" }
+
+    local init = NewAuraButtonInit(o)
+    for _, key in ipairs(c.groups) do
+        local filters
+        if key == "boss" then
+            filters = { isBossAura = true }
+        elseif o.bossFirst then
+            filters = { isBossAura = false }
+        elseif o.hidePermanent then
+            filters = { maxDuration = math.huge }
+        end
+        c:AddAuraGroup(key, o.filter, {
+            maxFrameCount = o.max,
+            initializeFrame = init,
+            candidateFilters = filters,
+            sortMethod = AuraContainerSortMethod.AuraInstanceIDOnly,
+            sortDirection = AuraContainerSortDirection.Normal,
+            layout = { elementSpacing = 2, lineSpacing = 2 },
+        })
+    end
+
+    c:SetUnit(o.unit)
+    c:SetEnabled(o.enabled ~= false)
+    return c
+end
+
+local function SetAuraRowFilter(c, filter)
+    if not c then return end
+    for _, key in ipairs(c.groups) do
+        c:SetAuraGroupFilterString(key, filter)
+    end
+end
+
+local function SetAuraRowMax(c, max)
+    if not c then return end
+    for _, key in ipairs(c.groups) do
+        c:SetAuraGroupMaxFrameCount(key, max)
+    end
+end
+
+local function SetAuraRowShown(c, shown)
+    if c then c:SetEnabled(shown) end
+end
+
+local function RefreshAuras(frame)
+    if not frame then return end
+    if frame.buffRow then frame.buffRow:UpdateAllAuras() end
+    if frame.debuffRow then frame.debuffRow:UpdateAllAuras() end
+end
+
+-- only works while auras arent secret, new buttons pick it up on creation anyway
+local function ApplyAuraTooltipSetting(frame)
+    local c = frame and frame.buffRow
+    if not c or C_Secrets.ShouldAurasBeSecret() then return end
+    for i = 1, c:GetAuraGroupFrameCount("auras") do
+        c:GetAuraGroupFrame("auras", i):EnableMouse(JarUnitFramesDB.enableAuraTooltips)
+    end
+end
+
+-- hide blizz frames the 12.1 way (like oUF), no reparenting or OnShow hooks
+local function DisableBlizzardFrame(f)
+    if not f then return end
+    f:UnregisterAllEvents()
+    f:SetRolesets("alwaysBlocked")
+    local subs = {
+        f.healthBar or f.healthbar or f.HealthBar or (f.HealthBarsContainer and f.HealthBarsContainer.healthBar),
+        f.manabar or f.ManaBar,
+        f.castBar or f.spellbar or f.CastingBarFrame,
+        f.BuffFrame or f.AurasFrame,
+        f.DebuffFrame,
+        f.petFrame or f.PetFrame,
+        f.totFrame,
+    }
+    for _, sub in pairs(subs) do
+        sub:UnregisterAllEvents()
+    end
+end
+
+local function HideBlizzardUnitFrames()
+    RunWhenSafe("blizzUnits", function()
+        for _, f in pairs({ PlayerFrame, TargetFrame, FocusFrame, PetFrame }) do
+            DisableBlizzardFrame(f)
+        end
+    end)
+end
+
+-- party only, and only when ours are on. raid container is left alone
+local function HideBlizzardPartyFrames()
+    if not JarUnitFramesDB.showPartyFrames then return end
+    RunWhenSafe("blizzParty", function()
+        if PartyFrame then
+            DisableBlizzardFrame(PartyFrame)
+            for f in PartyFrame.PartyMemberFramePool:EnumerateActive() do
+                DisableBlizzardFrame(f)
+            end
+        end
+        DisableBlizzardFrame(CompactPartyFrame)
+        for i = 1, 5 do
+            DisableBlizzardFrame(_G["CompactPartyFrameMember" .. i])
+        end
+    end)
+end
+
 -- Update frequency throttle (seconds)
 local UPDATE_INTERVAL = 0.1
 local timeSinceLastUpdate = 0
 
--- Forward declarations for update functions
-local UpdatePlayerFrame, UpdatePlayerBuffs, UpdatePlayerDebuffs, UpdateTargetFrame, UpdateTargetBuffs, UpdateTargetDebuffs
+-- Forward declarations (locals, not globals)
+local UpdatePlayerFrame, UpdateTargetFrame, UpdateFocusFrame, UpdateTargetTargetFrame, UpdatePetFrame, UpdatePartyFrame
+local CreateFocusFrame, CreateTargetTargetFrame, CreatePetFrame, CreatePartyFrame, RepositionPartyFrames, SetupFrames
 
 -- Create a custom player frame
 local function CreatePlayerFrame()
     -- Get font settings early so they can be used throughout frame creation
-    local font = JarUnitFramesDB.font or "Fonts\\FRIZQT__.TTF"
+    local font = GetSafeFont()
     local fontSize = JarUnitFramesDB.fontSize or 12
     
     local frame = CreateFrame("Button", "JUF_PlayerFrame", UIParent, "SecureUnitButtonTemplate")
@@ -306,34 +538,9 @@ local function CreatePlayerFrame()
         GameTooltip:Hide()
     end)
     
-    -- Register basic events
-    frame:RegisterEvent("UNIT_HEALTH")
-    frame:RegisterEvent("UNIT_MAXHEALTH")
-    frame:RegisterEvent("UNIT_POWER_UPDATE")
-    frame:RegisterEvent("UNIT_MAXPOWER")
-    frame:RegisterEvent("UNIT_AURA")  -- Must manually register for player!
-    frame:RegisterEvent("PLAYER_ENTERING_WORLD")
-    
-    -- Set up event handler
-    frame:SetScript("OnEvent", function(self, event, eventUnit)
-        if event == "UNIT_AURA" and eventUnit == "player" then
-            UpdatePlayerBuffs()
-            UpdatePlayerDebuffs()
-        elseif event:match("^UNIT_") then
-            if not eventUnit or eventUnit == "player" then
-                UpdatePlayerFrame()
-            end
-        elseif event == "PLAYER_ENTERING_WORLD" then
-            UpdatePlayerFrame()
-            UpdatePlayerBuffs()
-            UpdatePlayerDebuffs()
-        end
-    end)
-    
-    -- RegisterUnitWatch handles UNIT_AURA and other events automatically
-    if not InCombatLockdown() then
-        RegisterUnitWatch(frame)
-    end
+    -- per unit events, auras are the container's job now
+    RegisterUnitEvents(frame, "player")
+    frame:SetScript("OnEvent", function() UpdatePlayerFrame() end)
     
     -- Restore position or use default
     if JarUnitFramesDB.playerPos then
@@ -361,18 +568,8 @@ local function CreatePlayerFrame()
             JarUnitFramesDB.playerPos.y = y
             
             -- Mirror target frame position if enabled
-            if JarUnitFramesDB.mirrorTargetPosition and targetFrame then
-                local mirroredX = -x
-                local mirroredY = y
-                -- Use the same anchor point, just flip the X coordinate
-                local mirroredPoint = point
-                
-                JarUnitFramesDB.targetPos.point = mirroredPoint
-                JarUnitFramesDB.targetPos.x = mirroredX
-                JarUnitFramesDB.targetPos.y = mirroredY
-                
-                targetFrame:ClearAllPoints()
-                targetFrame:SetPoint(mirroredPoint, UIParent, mirroredPoint, mirroredX, mirroredY)
+            if JarUnitFramesDB.mirrorTargetPosition then
+                MirrorTargetPosition()
             end
         end
     end)
@@ -392,8 +589,7 @@ local function CreatePlayerFrame()
     frame.healthBar:SetStatusBarTexture(texture)
     
     -- Get class color for player
-    local _, class = UnitClass("player")
-    local classColor = RAID_CLASS_COLORS[class]
+    local classColor = GetUnitClassColor("player")
     if classColor then
         frame.healthBar:SetStatusBarColor(classColor.r, classColor.g, classColor.b)
     else
@@ -507,114 +703,21 @@ local function CreatePlayerFrame()
     frame.name:SetJustifyH("LEFT")
     frame.name:SetText("Player")
     
-    -- Buff container (above the frame)
-    frame.buffs = {}
-    for i = 1, 40 do  -- Max 40 buff icons
-        local buff = CreateFrame("Frame", nil, frame)
-        buff:SetSize(20, 20)  -- Small icons
-        
-        -- Calculate position: 10 per row, growing upward
-        local row = math.floor((i - 1) / 10)
-        local col = (i - 1) % 10
-        buff:SetPoint("BOTTOMLEFT", frame.healthBar, "TOPLEFT", col * 22, 2 + (row * 22))
-        
-        buff.icon = buff:CreateTexture(nil, "ARTWORK")
-        buff.icon:SetAllPoints()
-        buff.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)  -- Crop edges
-        
-        buff.border = buff:CreateTexture(nil, "OVERLAY")
-        buff.border:SetAllPoints()
-        buff.border:SetTexture("Interface\\Buttons\\UI-Debuff-Overlays")
-        buff.border:SetTexCoord(0.296875, 0.5703125, 0, 0.515625)
-        
-        buff.count = buff:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
-        buff.count:SetPoint("BOTTOMRIGHT", 2, 0)
-        
-        -- Add cooldown frame for duration spiral
-        buff.cooldown = CreateFrame("Cooldown", nil, buff, "CooldownFrameTemplate")
-        buff.cooldown:SetAllPoints()
-        buff.cooldown:SetDrawEdge(false)
-        buff.cooldown:SetDrawSwipe(true)
-        buff.cooldown:SetReverse(true)
-        buff.cooldown:SetHideCountdownNumbers(true)
-        
-        -- Mouse-over tooltip (always active; setting checked live so config toggle takes effect)
-        buff:EnableMouse(true)
-        buff:SetScript("OnEnter", function(self)
-            if self.auraInstanceID and not GameTooltip:IsForbidden() and JarUnitFramesDB.enableAuraTooltips then
-                pcall(function()
-                    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                    GameTooltip:SetUnitAuraByAuraInstanceID("player", self.auraInstanceID)
-                    GameTooltip:Show()
-                end)
-            end
-        end)
-        buff:SetScript("OnLeave", function(self)
-            if not GameTooltip:IsForbidden() then
-                GameTooltip:Hide()
-            end
-        end)
-        
-        buff:Hide()
-        frame.buffs[i] = buff
-    end
-    
-    -- Debuff container (below the frame)
-    frame.debuffs = {}
-    for i = 1, 40 do  -- Max 40 debuff icons
-        local debuff = CreateFrame("Frame", nil, frame)
-        debuff:SetSize(20, 20)  -- Same icon size
-        
-        -- Calculate position: 10 per row, growing downward
-        local row = math.floor((i - 1) / 10)
-        local col = (i - 1) % 10
-        debuff:SetPoint("TOPLEFT", frame.healthBar, "BOTTOMLEFT", col * 22, -35 - (row * 22))
-        
-        debuff.icon = debuff:CreateTexture(nil, "ARTWORK")
-        debuff.icon:SetAllPoints()
-        debuff.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)  -- Crop edges
-        
-        debuff.border = debuff:CreateTexture(nil, "OVERLAY")
-        debuff.border:SetAllPoints()
-        debuff.border:SetTexture("Interface\\Buttons\\UI-Debuff-Overlays")
-        debuff.border:SetTexCoord(0.296875, 0.5703125, 0, 0.515625)
-        
-        debuff.count = debuff:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
-        debuff.count:SetPoint("BOTTOMRIGHT", 2, 0)
-        
-        -- Add cooldown frame for duration spiral
-        debuff.cooldown = CreateFrame("Cooldown", nil, debuff, "CooldownFrameTemplate")
-        debuff.cooldown:SetAllPoints()
-        debuff.cooldown:SetDrawEdge(false)
-        debuff.cooldown:SetDrawSwipe(true)
-        debuff.cooldown:SetReverse(true)
-        debuff.cooldown:SetHideCountdownNumbers(true)
-        
-        -- Enable mouse interaction for tooltips
-        debuff:EnableMouse(true)
-        debuff:SetScript("OnEnter", function(self)
-            if self.auraInstanceID then
-                pcall(function()
-                    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                    GameTooltip:SetUnitDebuffByAuraInstanceID("player", self.auraInstanceID)
-                    GameTooltip:Show()
-                end)
-            end
-        end)
-        debuff:SetScript("OnLeave", function(self)
-            GameTooltip:Hide()
-        end)
-        
-        debuff:Hide()
-        frame.debuffs[i] = debuff
-    end
-    
-    -- Register unit watch for automatic show/hide
-    if not InCombatLockdown() then
-        RegisterUnitWatch(frame)
-    end
-    
-    frame:Show()
+    -- Buffs above, debuffs below
+    frame.buffRow = CreateAuraRow(frame, {
+        unit = "player", filter = "HELPFUL", isBuff = true, max = 40,
+        hidePermanent = JarUnitFramesDB.hidePlayerPermanentBuffs,
+        size = 20, perRow = 10, bordered = true, stacks = true,
+        point = "BOTTOMLEFT", relTo = frame.healthBar, relPoint = "TOPLEFT", x = 0, y = 2, growX = 1, growY = 1,
+    })
+    frame.debuffRow = CreateAuraRow(frame, {
+        unit = "player", filter = JarUnitFramesDB.playerDebuffFilter or "HARMFUL", bossFirst = true,
+        max = JarUnitFramesDB.playerMaxDebuffs or 40,
+        size = 20, perRow = 10, bordered = true, stacks = true,
+        point = "TOPLEFT", relTo = frame.healthBar, relPoint = "BOTTOMLEFT", x = 0, y = -35, growX = 1, growY = -1,
+    })
+
+    UpdateFrameFonts(frame)
     
     return frame
 end
@@ -622,7 +725,7 @@ end
 -- Create a custom target frame
 local function CreateTargetFrame()
     -- Get font settings early so they can be used throughout frame creation
-    local font = JarUnitFramesDB.font or "Fonts\\FRIZQT__.TTF"
+    local font = GetSafeFont()
     local fontSize = JarUnitFramesDB.fontSize or 12
     
     local frame = CreateFrame("Button", "JUF_TargetFrame", UIParent, "SecureUnitButtonTemplate")
@@ -646,38 +749,22 @@ local function CreateTargetFrame()
     end)
     
     -- Register events
-    frame:RegisterEvent("UNIT_HEALTH")
-    frame:RegisterEvent("UNIT_MAXHEALTH")
-    frame:RegisterEvent("UNIT_POWER_UPDATE")
-    frame:RegisterEvent("UNIT_MAXPOWER")
-    frame:RegisterEvent("UNIT_AURA")
+    RegisterUnitEvents(frame, "target")
     frame:RegisterEvent("PLAYER_TARGET_CHANGED")
-    frame:RegisterEvent("PLAYER_ENTERING_WORLD")
     frame:RegisterEvent("INSPECT_READY")
-    
-    -- Set up event handler
-    frame:SetScript("OnEvent", function(self, event, eventUnit)
+
+    frame:SetScript("OnEvent", function(self, event, arg1)
         if event == "INSPECT_READY" then
-            OnInspectReady(eventUnit)  -- eventUnit is the GUID for INSPECT_READY
-        elseif event == "UNIT_AURA" and eventUnit == "target" then
-            UpdateTargetBuffs()
-            UpdateTargetDebuffs()
-        elseif event:match("^UNIT_") then
-            if not eventUnit or eventUnit == "target" then
-                UpdateTargetFrame()
-            end
-        elseif event == "PLAYER_TARGET_CHANGED" or event == "PLAYER_ENTERING_WORLD" then
+            OnInspectReady(arg1)  -- arg1 is the GUID here
+        elseif event == "PLAYER_TARGET_CHANGED" then
+            ShowIlvl(nil)
             UpdateTargetFrame()
-            UpdateTargetBuffs()
-            UpdateTargetDebuffs()
+            RefreshAuras(self)
             RequestTargetItemLevel()
+        else
+            UpdateTargetFrame()
         end
     end)
-    
-    -- RegisterUnitWatch for automatic show/hide
-    if not InCombatLockdown() then
-        RegisterUnitWatch(frame)
-    end
     
     -- Restore position or use default
     if JarUnitFramesDB.targetPos then
@@ -807,109 +894,21 @@ local function CreateTargetFrame()
     frame.ilvlText:SetTextColor(0.6, 0.8, 1.0)
     frame.ilvlText:Hide()
     
-    -- Buff container (above the frame)
-    frame.buffs = {}
-    for i = 1, 40 do  -- Max 40 buff icons
-        local buff = CreateFrame("Frame", nil, frame)
-        buff:SetSize(20, 20)  -- Small icons
-        
-        -- Calculate position: 10 per row, growing upward and right to left
-        local row = math.floor((i - 1) / 10)
-        local col = (i - 1) % 10
-        buff:SetPoint("BOTTOMRIGHT", frame.healthBar, "TOPRIGHT", -col * 22, 2 + (row * 22))
-        
-        buff.icon = buff:CreateTexture(nil, "ARTWORK")
-        buff.icon:SetAllPoints()
-        buff.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)  -- Crop edges
-        
-        buff.border = buff:CreateTexture(nil, "OVERLAY")
-        buff.border:SetAllPoints()
-        buff.border:SetTexture("Interface\\Buttons\\UI-Debuff-Overlays")
-        buff.border:SetTexCoord(0.296875, 0.5703125, 0, 0.515625)
-        
-        buff.count = buff:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
-        buff.count:SetPoint("BOTTOMRIGHT", 2, 0)
-        
-        -- Add cooldown frame for duration spiral
-        buff.cooldown = CreateFrame("Cooldown", nil, buff, "CooldownFrameTemplate")
-        buff.cooldown:SetAllPoints()
-        buff.cooldown:SetDrawEdge(false)
-        buff.cooldown:SetDrawSwipe(true)
-        buff.cooldown:SetReverse(true)
-        buff.cooldown:SetHideCountdownNumbers(true)
-        
-        -- Mouse-over tooltip (always active; setting checked live so config toggle takes effect)
-        buff:EnableMouse(true)
-        buff:SetScript("OnEnter", function(self)
-            if self.auraInstanceID and not GameTooltip:IsForbidden() and JarUnitFramesDB.enableAuraTooltips then
-                pcall(function()
-                    GameTooltip:SetOwner(self, "ANCHOR_LEFT")
-                    GameTooltip:SetUnitAuraByAuraInstanceID("target", self.auraInstanceID)
-                    GameTooltip:Show()
-                end)
-            end
-        end)
-        buff:SetScript("OnLeave", function(self)
-            if not GameTooltip:IsForbidden() then
-                GameTooltip:Hide()
-            end
-        end)
-        
-        buff:Hide()
-        frame.buffs[i] = buff
-    end
-    
-    -- Debuff container (below the frame, will swap with buffs for enemies)
-    frame.debuffs = {}
-    for i = 1, 40 do  -- Max 40 debuff icons
-        local debuff = CreateFrame("Frame", nil, frame)
-        debuff:SetSize(20, 20)  -- Same icon size
-        
-        -- Calculate position: 10 per row, growing downward and right to left
-        local row = math.floor((i - 1) / 10)
-        local col = (i - 1) % 10
-        debuff:SetPoint("TOPRIGHT", frame.healthBar, "BOTTOMRIGHT", -col * 22, -35 - (row * 22))
-        
-        debuff.icon = debuff:CreateTexture(nil, "ARTWORK")
-        debuff.icon:SetAllPoints()
-        debuff.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)  -- Crop edges
-        
-        debuff.border = debuff:CreateTexture(nil, "OVERLAY")
-        debuff.border:SetAllPoints()
-        debuff.border:SetTexture("Interface\\Buttons\\UI-Debuff-Overlays")
-        debuff.border:SetTexCoord(0.296875, 0.5703125, 0, 0.515625)
-        
-        debuff.count = debuff:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
-        debuff.count:SetPoint("BOTTOMRIGHT", 2, 0)
-        
-        -- Add cooldown frame for duration spiral
-        debuff.cooldown = CreateFrame("Cooldown", nil, debuff, "CooldownFrameTemplate")
-        debuff.cooldown:SetAllPoints()
-        debuff.cooldown:SetDrawEdge(false)
-        debuff.cooldown:SetDrawSwipe(true)
-        debuff.cooldown:SetReverse(true)
-        debuff.cooldown:SetHideCountdownNumbers(true)
-        
-        -- Enable mouse interaction for tooltips
-        debuff:EnableMouse(true)
-        debuff:SetScript("OnEnter", function(self)
-            if self.auraInstanceID then
-                pcall(function()
-                    GameTooltip:SetOwner(self, "ANCHOR_LEFT")
-                    GameTooltip:SetUnitDebuffByAuraInstanceID("target", self.auraInstanceID)
-                    GameTooltip:Show()
-                end)
-            end
-        end)
-        debuff:SetScript("OnLeave", function(self)
-            GameTooltip:Hide()
-        end)
-        
-        debuff:Hide()
-        frame.debuffs[i] = debuff
-    end
-    
-    frame:Show()
+    -- Buffs above, debuffs below, both growing right to left
+    frame.buffRow = CreateAuraRow(frame, {
+        unit = "target", filter = "HELPFUL", isBuff = true, max = 40,
+        hidePermanent = JarUnitFramesDB.hideTargetPermanentBuffs,
+        size = 20, perRow = 10, bordered = true, stacks = true, tooltip = "ANCHOR_LEFT",
+        point = "BOTTOMRIGHT", relTo = frame.healthBar, relPoint = "TOPRIGHT", x = 0, y = 2, growX = -1, growY = 1,
+    })
+    frame.debuffRow = CreateAuraRow(frame, {
+        unit = "target", filter = JarUnitFramesDB.targetDebuffFilter or "HARMFUL", bossFirst = true,
+        max = JarUnitFramesDB.targetMaxDebuffs or 40,
+        size = 20, perRow = 10, bordered = true, stacks = true, tooltip = "ANCHOR_LEFT",
+        point = "TOPRIGHT", relTo = frame.healthBar, relPoint = "BOTTOMRIGHT", x = 0, y = -35, growX = -1, growY = -1,
+    })
+
+    UpdateFrameFonts(frame)
     return frame
 end
 
@@ -936,29 +935,15 @@ function CreateFocusFrame()
     end)
     
     -- Register events
-    frame:RegisterEvent("PLAYER_TARGET_CHANGED")
-    frame:RegisterEvent("UNIT_HEALTH")
-    frame:RegisterEvent("UNIT_MAXHEALTH")
-    frame:RegisterEvent("UNIT_POWER_UPDATE")
-    frame:RegisterEvent("UNIT_MAXPOWER")
-    frame:RegisterEvent("UNIT_NAME_UPDATE")
-    frame:RegisterEvent("UNIT_LEVEL")
-    frame:RegisterEvent("UNIT_AURA")
+    RegisterUnitEvents(frame, "focus")
     frame:RegisterEvent("PLAYER_FOCUS_CHANGED")
-    
-    frame:SetScript("OnEvent", function(self, event, ...)
-        local unit = ...
-        if event == "PLAYER_FOCUS_CHANGED" or event == "PLAYER_TARGET_CHANGED" or (unit and unit == "focus") then
-            UpdateFocusFrame()
-            UpdateFocusBuffs()
-            UpdateFocusDebuffs()
+
+    frame:SetScript("OnEvent", function(self, event)
+        UpdateFocusFrame()
+        if event == "PLAYER_FOCUS_CHANGED" then
+            RefreshAuras(self)
         end
     end)
-    
-    -- RegisterUnitWatch for automatic show/hide
-    if not InCombatLockdown() then
-        RegisterUnitWatch(frame)
-    end
     
     -- Restore position or use default
     if JarUnitFramesDB.focusPos then
@@ -993,7 +978,7 @@ function CreateFocusFrame()
     frame.shadow:SetPoint("BOTTOMRIGHT", 3, -3)
     frame.shadow:SetColorTexture(0, 0, 0, JarUnitFramesDB.bgAlpha)
     
-    local font = JarUnitFramesDB.font or "Fonts\\FRIZQT__.TTF"
+    local font = GetSafeFont()
     local fontSize = JarUnitFramesDB.fontSize or 12
     local texture = JarUnitFramesDB.texture or "Interface\\TargetingFrame\\UI-StatusBar"
     
@@ -1084,105 +1069,20 @@ function CreateFocusFrame()
     frame.name:SetJustifyH("RIGHT")
     frame.name:SetText("No Focus")
     
-    -- Buff container (above the frame)
-    frame.buffs = {}
-    frame.buffContainer = CreateFrame("Frame", nil, frame)
-    frame.buffContainer:SetSize(220, 20)
-    frame.buffContainer:SetPoint("BOTTOMRIGHT", frame.healthBar, "TOPRIGHT", 0, 2)
-    
-    for i = 1, 40 do
-        local buff = CreateFrame("Frame", nil, frame.buffContainer)
-        buff:SetSize(18, 18)
-        
-        local col = (i - 1) % 10
-        local row = math.floor((i - 1) / 10)
-        buff:SetPoint("BOTTOMRIGHT", frame.buffContainer, "BOTTOMRIGHT", -col * 20, row * 20)
-        
-        buff.icon = buff:CreateTexture(nil, "ARTWORK")
-        buff.icon:SetAllPoints()
-        
-        buff.count = buff:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
-        buff.count:SetPoint("BOTTOMRIGHT", 2, 0)
-        
-        -- Add cooldown frame for duration spiral
-        buff.cooldown = CreateFrame("Cooldown", nil, buff, "CooldownFrameTemplate")
-        buff.cooldown:SetAllPoints()
-        buff.cooldown:SetDrawEdge(false)
-        buff.cooldown:SetDrawSwipe(true)
-        buff.cooldown:SetReverse(true)
-        buff.cooldown:SetHideCountdownNumbers(true)
-        
-        -- Mouse-over tooltip (always active; setting checked live so config toggle takes effect)
-        buff:EnableMouse(true)
-        buff:SetScript("OnEnter", function(self)
-            if self.auraInstanceID and not GameTooltip:IsForbidden() and JarUnitFramesDB.enableAuraTooltips then
-                pcall(function()
-                    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                    GameTooltip:SetUnitAuraByAuraInstanceID("focus", self.auraInstanceID)
-                    GameTooltip:Show()
-                end)
-            end
-        end)
-        buff:SetScript("OnLeave", function()
-            if not GameTooltip:IsForbidden() then
-                GameTooltip:Hide()
-            end
-        end)
-        
-        buff:Hide()
-        frame.buffs[i] = buff
-    end
-    
-    -- Debuff container (below the name)
-    frame.debuffs = {}
-    frame.debuffContainer = CreateFrame("Frame", nil, frame)
-    frame.debuffContainer:SetSize(220, 20)
-    frame.debuffContainer:SetPoint("TOPRIGHT", frame.name, "BOTTOMRIGHT", 0, -2)
-    
-    for i = 1, 40 do
-        local debuff = CreateFrame("Frame", nil, frame.debuffContainer)
-        debuff:SetSize(18, 18)
-        
-        local col = (i - 1) % 10
-        local row = math.floor((i - 1) / 10)
-        debuff:SetPoint("TOPRIGHT", frame.debuffContainer, "TOPRIGHT", -col * 20, -row * 20)
-        
-        debuff.icon = debuff:CreateTexture(nil, "ARTWORK")
-        debuff.icon:SetAllPoints()
-        
-        debuff.count = debuff:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
-        debuff.count:SetPoint("BOTTOMRIGHT", 2, 0)
-        debuff.count:SetFont(font, 10, "OUTLINE")
-        
-        -- Add cooldown frame for duration spiral
-        debuff.cooldown = CreateFrame("Cooldown", nil, debuff, "CooldownFrameTemplate")
-        debuff.cooldown:SetAllPoints()
-        debuff.cooldown:SetDrawEdge(false)
-        debuff.cooldown:SetDrawSwipe(true)
-        debuff.cooldown:SetReverse(true)
-        debuff.cooldown:SetHideCountdownNumbers(true)
-        
-        debuff:SetScript("OnEnter", function(self)
-            pcall(function()
-                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                GameTooltip:SetUnitDebuffByAuraInstanceID("focus", self.auraInstanceID)
-                GameTooltip:Show()
-            end)
-        end)
-        debuff:SetScript("OnLeave", function() GameTooltip:Hide() end)
-        
-        debuff:Hide()
-        frame.debuffs[i] = debuff
-    end
-    
-    frame:Show()
-    
-    -- Initial update to show buffs/debuffs if focus exists
-    if UnitExists("focus") then
-        UpdateFocusFrame()
-        UpdateFocusBuffs()
-        UpdateFocusDebuffs()
-    end
+    -- Buffs above, debuffs below the name
+    frame.buffRow = CreateAuraRow(frame, {
+        unit = "focus", filter = "HELPFUL", isBuff = true, max = 40, enabled = JarUnitFramesDB.focusShowBuffs,
+        size = 18, perRow = 10,
+        point = "BOTTOMRIGHT", relTo = frame.healthBar, relPoint = "TOPRIGHT", x = 0, y = 2, growX = -1, growY = 1,
+    })
+    frame.debuffRow = CreateAuraRow(frame, {
+        unit = "focus", filter = JarUnitFramesDB.focusDebuffFilter or "HARMFUL|RAID", bossFirst = true,
+        max = 40, enabled = JarUnitFramesDB.focusShowDebuffs,
+        size = 18, perRow = 10,
+        point = "TOPRIGHT", relTo = frame.name, relPoint = "BOTTOMRIGHT", x = 0, y = -2, growX = -1, growY = -1,
+    })
+
+    UpdateFrameFonts(frame)
     
     return frame
 end
@@ -1210,32 +1110,14 @@ function CreateTargetTargetFrame()
         GameTooltip:Hide()
     end)
     
-    -- Register events
+    -- targettarget has no unit events, so UNIT_TARGET on target + polling in OnUpdate
     frame:RegisterEvent("PLAYER_TARGET_CHANGED")
-    frame:RegisterEvent("UNIT_HEALTH")
-    frame:RegisterEvent("UNIT_MAXHEALTH")
-    frame:RegisterEvent("UNIT_POWER_UPDATE")
-    frame:RegisterEvent("UNIT_MAXPOWER")
-    frame:RegisterEvent("UNIT_NAME_UPDATE")
-    frame:RegisterEvent("UNIT_AURA")
-    
-    frame:SetScript("OnEvent", function(self, event, ...)
-        local unit = ...
-        if event == "PLAYER_TARGET_CHANGED" or (unit and unit == "targettarget") then
-            UpdateTargetTargetFrame()
-            if JarUnitFramesDB.totShowBuffs then
-                UpdateTargetTargetBuffs()
-            end
-            if JarUnitFramesDB.totShowDebuffs then
-                UpdateTargetTargetDebuffs()
-            end
-        end
+    frame:RegisterUnitEvent("UNIT_TARGET", "target")
+
+    frame:SetScript("OnEvent", function(self)
+        UpdateTargetTargetFrame()
+        RefreshAuras(self)
     end)
-    
-    -- RegisterUnitWatch for automatic show/hide
-    if not InCombatLockdown() then
-        RegisterUnitWatch(frame)
-    end
     
     -- Restore position or use default
     if JarUnitFramesDB.totPos then
@@ -1270,7 +1152,7 @@ function CreateTargetTargetFrame()
     frame.shadow:SetPoint("BOTTOMRIGHT", 3, -3)
     frame.shadow:SetColorTexture(0, 0, 0, JarUnitFramesDB.bgAlpha)
     
-    local font = JarUnitFramesDB.font or "Fonts\\FRIZQT__.TTF"
+    local font = GetSafeFont()
     local fontSize = JarUnitFramesDB.fontSize or 12
     local texture = JarUnitFramesDB.texture or "Interface\\TargetingFrame\\UI-StatusBar"
     
@@ -1356,94 +1238,20 @@ function CreateTargetTargetFrame()
     frame.name:SetJustifyH("LEFT")
     frame.name:SetText("No ToT")
     
-    -- Buff container (above the frame)
-    frame.buffs = {}
-    frame.buffContainer = CreateFrame("Frame", nil, frame)
-    frame.buffContainer:SetSize(width, 20)
-    frame.buffContainer:SetPoint("BOTTOMLEFT", frame.healthBar, "TOPLEFT", 0, 2)
-        
-    for i = 1, 20 do
-        local buff = CreateFrame("Frame", nil, frame.buffContainer)
-        buff:SetSize(18, 18)
-        
-        local col = (i - 1) % 7
-        local row = math.floor((i - 1) / 7)
-        buff:SetPoint("BOTTOMLEFT", frame.buffContainer, "BOTTOMLEFT", col * 20, row * 20)
-            
-            buff.icon = buff:CreateTexture(nil, "ARTWORK")
-            buff.icon:SetAllPoints()
-            
-            buff.count = buff:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
-            buff.count:SetPoint("BOTTOMRIGHT", 2, 0)
-            
-            -- Mouse-over tooltip (always active; setting checked live so config toggle takes effect)
-            buff:EnableMouse(true)
-            buff:SetScript("OnEnter", function(self)
-                if self.auraInstanceID and not GameTooltip:IsForbidden() and JarUnitFramesDB.enableAuraTooltips then
-                    pcall(function()
-                        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                        GameTooltip:SetUnitAuraByAuraInstanceID("targettarget", self.auraInstanceID)
-                        GameTooltip:Show()
-                    end)
-                end
-            end)
-            buff:SetScript("OnLeave", function()
-                if not GameTooltip:IsForbidden() then
-                    GameTooltip:Hide()
-                end
-            end)
-            
-        buff:Hide()
-        frame.buffs[i] = buff
-    end
-    
-    -- Debuff container (below the name)
-    frame.debuffs = {}
-    frame.debuffContainer = CreateFrame("Frame", nil, frame)
-    frame.debuffContainer:SetSize(width, 20)
-    frame.debuffContainer:SetPoint("TOPLEFT", frame.name, "BOTTOMLEFT", 0, -2)
-    
-    for i = 1, 20 do
-        local debuff = CreateFrame("Frame", nil, frame.debuffContainer)
-        debuff:SetSize(18, 18)
-        
-        local col = (i - 1) % 7
-        local row = math.floor((i - 1) / 7)
-        debuff:SetPoint("TOPLEFT", frame.debuffContainer, "TOPLEFT", col * 20, -row * 20)
-        
-        debuff.icon = debuff:CreateTexture(nil, "ARTWORK")
-        debuff.icon:SetAllPoints()
-        
-        debuff.count = debuff:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
-        debuff.count:SetPoint("BOTTOMRIGHT", 2, 0)
-        debuff.count:SetFont(font, 10, "OUTLINE")
-        debuff.count:SetTextColor(1, 1, 1)
-        
-        debuff:SetScript("OnEnter", function(self)
-            pcall(function()
-                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                GameTooltip:SetUnitDebuffByAuraInstanceID("targettarget", self.auraInstanceID)
-                GameTooltip:Show()
-            end)
-        end)
-        debuff:SetScript("OnLeave", function() GameTooltip:Hide() end)
-        
-        debuff:Hide()
-        frame.debuffs[i] = debuff
-    end
-    
-    frame:Show()
-    
-    -- Initial update to show buffs/debuffs if targettarget exists
-    if UnitExists("targettarget") then
-        UpdateTargetTargetFrame()
-        if JarUnitFramesDB.totShowBuffs then
-            UpdateTargetTargetBuffs()
-        end
-        if JarUnitFramesDB.totShowDebuffs then
-            UpdateTargetTargetDebuffs()
-        end
-    end
+    -- Buffs above, debuffs below the name
+    frame.buffRow = CreateAuraRow(frame, {
+        unit = "targettarget", filter = "HELPFUL", isBuff = true, max = 20, enabled = JarUnitFramesDB.totShowBuffs,
+        size = 18, perRow = 7,
+        point = "BOTTOMLEFT", relTo = frame.healthBar, relPoint = "TOPLEFT", x = 0, y = 2, growX = 1, growY = 1,
+    })
+    frame.debuffRow = CreateAuraRow(frame, {
+        unit = "targettarget", filter = JarUnitFramesDB.totDebuffFilter or "HARMFUL|RAID", bossFirst = true,
+        max = 20, enabled = JarUnitFramesDB.totShowDebuffs,
+        size = 18, perRow = 7,
+        point = "TOPLEFT", relTo = frame.name, relPoint = "BOTTOMLEFT", x = 0, y = -2, growX = 1, growY = -1,
+    })
+
+    UpdateFrameFonts(frame)
     
     return frame
 end
@@ -1472,31 +1280,15 @@ function CreatePetFrame()
     end)
     
     -- Register events
-    frame:RegisterEvent("UNIT_PET")
-    frame:RegisterEvent("UNIT_HEALTH")
-    frame:RegisterEvent("UNIT_MAXHEALTH")
-    frame:RegisterEvent("UNIT_POWER_UPDATE")
-    frame:RegisterEvent("UNIT_MAXPOWER")
-    frame:RegisterEvent("UNIT_NAME_UPDATE")
-    frame:RegisterEvent("UNIT_AURA")
-    
-    frame:SetScript("OnEvent", function(self, event, ...)
-        local unit = ...
-        if event == "UNIT_PET" or (unit and unit == "pet") then
-            UpdatePetFrame()
-            if JarUnitFramesDB.petShowBuffs then
-                UpdatePetBuffs()
-            end
-            if JarUnitFramesDB.petShowDebuffs then
-                UpdatePetDebuffs()
-            end
+    RegisterUnitEvents(frame, "pet")
+    frame:RegisterUnitEvent("UNIT_PET", "player")
+
+    frame:SetScript("OnEvent", function(self, event)
+        UpdatePetFrame()
+        if event == "UNIT_PET" then
+            RefreshAuras(self)
         end
     end)
-    
-    -- RegisterUnitWatch for automatic show/hide
-    if not InCombatLockdown() then
-        RegisterUnitWatch(frame)
-    end
     
     -- Restore position or use default
     if JarUnitFramesDB.petPos then
@@ -1531,7 +1323,7 @@ function CreatePetFrame()
     frame.shadow:SetPoint("BOTTOMRIGHT", 3, -3)
     frame.shadow:SetColorTexture(0, 0, 0, JarUnitFramesDB.bgAlpha)
     
-    local font = JarUnitFramesDB.font or "Fonts\\FRIZQT__.TTF"
+    local font = GetSafeFont()
     local fontSize = JarUnitFramesDB.fontSize or 12
     local texture = JarUnitFramesDB.texture or "Interface\\TargetingFrame\\UI-StatusBar"
     
@@ -1617,107 +1409,26 @@ function CreatePetFrame()
     frame.name:SetJustifyH("LEFT")
     frame.name:SetText("No Pet")
     
-    -- Buff container (above the frame)
-    frame.buffs = {}
-    frame.buffContainer = CreateFrame("Frame", nil, frame)
-    frame.buffContainer:SetSize(width, 20)
-    frame.buffContainer:SetPoint("BOTTOMLEFT", frame.healthBar, "TOPLEFT", 0, 2)
-    
-    for i = 1, 20 do
-        local buff = CreateFrame("Frame", nil, frame.buffContainer)
-        buff:SetSize(18, 18)
-        
-        local col = (i - 1) % 7
-        local row = math.floor((i - 1) / 7)
-        buff:SetPoint("BOTTOMLEFT", frame.buffContainer, "BOTTOMLEFT", col * 20, row * 20)
-        
-        buff.icon = buff:CreateTexture(nil, "ARTWORK")
-        buff.icon:SetAllPoints()
-        
-        buff.count = buff:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
-        buff.count:SetPoint("BOTTOMRIGHT", 2, 0)
-        buff.count:SetFont(font, 10, "OUTLINE")
-        buff.count:SetTextColor(1, 1, 1)
-        
-        -- Add cooldown frame for duration spiral
-        buff.cooldown = CreateFrame("Cooldown", nil, buff, "CooldownFrameTemplate")
-        buff.cooldown:SetAllPoints()
-        buff.cooldown:SetDrawEdge(false)
-        buff.cooldown:SetDrawSwipe(true)
-        buff.cooldown:SetReverse(true)
-        buff.cooldown:SetHideCountdownNumbers(true)
-        
-        -- Mouse-over tooltip (always active; setting checked live so config toggle takes effect)
-        buff:EnableMouse(true)
-        buff:SetScript("OnEnter", function(self)
-            if self.auraInstanceID and not GameTooltip:IsForbidden() and JarUnitFramesDB.enableAuraTooltips then
-                pcall(function()
-                    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                    GameTooltip:SetUnitAuraByAuraInstanceID("pet", self.auraInstanceID)
-                    GameTooltip:Show()
-                end)
-            end
-        end)
-        buff:SetScript("OnLeave", function()
-            if not GameTooltip:IsForbidden() then
-                GameTooltip:Hide()
-            end
-        end)
-        
-        buff:Hide()
-        frame.buffs[i] = buff
-    end
-    
-    -- Debuff container (below the name)
-    frame.debuffs = {}
-    frame.debuffContainer = CreateFrame("Frame", nil, frame)
-    frame.debuffContainer:SetSize(width, 20)
-    frame.debuffContainer:SetPoint("TOPLEFT", frame.name, "BOTTOMLEFT", 0, -2)
-    
-    for i = 1, 20 do
-        local debuff = CreateFrame("Frame", nil, frame.debuffContainer)
-        debuff:SetSize(18, 18)
-        
-        local col = (i - 1) % 7
-        local row = math.floor((i - 1) / 7)
-        debuff:SetPoint("TOPLEFT", frame.debuffContainer, "TOPLEFT", col * 20, -row * 20)
-        
-        debuff.icon = debuff:CreateTexture(nil, "ARTWORK")
-        debuff.icon:SetAllPoints()
-        
-        debuff.count = debuff:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
-        debuff.count:SetPoint("BOTTOMRIGHT", 2, 0)
-        debuff.count:SetFont(font, 10, "OUTLINE")
-        debuff.count:SetTextColor(1, 1, 1)
-        
-        -- Add cooldown frame for duration spiral
-        debuff.cooldown = CreateFrame("Cooldown", nil, debuff, "CooldownFrameTemplate")
-        debuff.cooldown:SetAllPoints()
-        debuff.cooldown:SetDrawEdge(false)
-        debuff.cooldown:SetDrawSwipe(true)
-        debuff.cooldown:SetReverse(true)
-        debuff.cooldown:SetHideCountdownNumbers(true)
-        
-        debuff:SetScript("OnEnter", function(self)
-            pcall(function()
-                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                GameTooltip:SetUnitDebuffByAuraInstanceID("pet", self.auraInstanceID)
-                GameTooltip:Show()
-            end)
-        end)
-        debuff:SetScript("OnLeave", function() GameTooltip:Hide() end)
-        
-        debuff:Hide()
-        frame.debuffs[i] = debuff
-    end
-    
-    frame:Show()
+    -- Buffs above, debuffs below the name
+    frame.buffRow = CreateAuraRow(frame, {
+        unit = "pet", filter = "HELPFUL", isBuff = true, max = 20, enabled = JarUnitFramesDB.petShowBuffs,
+        size = 18, perRow = 7,
+        point = "BOTTOMLEFT", relTo = frame.healthBar, relPoint = "TOPLEFT", x = 0, y = 2, growX = 1, growY = 1,
+    })
+    frame.debuffRow = CreateAuraRow(frame, {
+        unit = "pet", filter = JarUnitFramesDB.petDebuffFilter or "HARMFUL", bossFirst = true,
+        max = 20, enabled = JarUnitFramesDB.petShowDebuffs,
+        size = 18, perRow = 7,
+        point = "TOPLEFT", relTo = frame.name, relPoint = "BOTTOMLEFT", x = 0, y = -2, growX = 1, growY = -1,
+    })
+
+    UpdateFrameFonts(frame)
     return frame
 end
 
 -- Create party frame (for party1-4)
 function CreatePartyFrame(partyNum)
-    local font = JarUnitFramesDB.font or "Fonts\\FRIZQT__.TTF"
+    local font = GetSafeFont()
     local fontSize = JarUnitFramesDB.fontSize or 12
     local texture = JarUnitFramesDB.texture or "Interface\\TargetingFrame\\UI-StatusBar"
     local width = JarUnitFramesDB.partyWidth or 150
@@ -1769,31 +1480,15 @@ function CreatePartyFrame(partyNum)
     frame.unlockBorder:Hide()
     
     -- Register events
-    frame:RegisterEvent("UNIT_HEALTH")
-    frame:RegisterEvent("UNIT_MAXHEALTH")
-    frame:RegisterEvent("UNIT_POWER_UPDATE")
-    frame:RegisterEvent("UNIT_MAXPOWER")
-    frame:RegisterEvent("UNIT_AURA")
-    frame:RegisterEvent("UNIT_NAME_UPDATE")
+    RegisterUnitEvents(frame, "party"..partyNum)
     frame:RegisterEvent("GROUP_ROSTER_UPDATE")
-    
-    -- Event handler
-    frame:SetScript("OnEvent", function(self, event, eventUnit)
-        if event == "UNIT_AURA" and eventUnit == "party"..partyNum then
-            UpdatePartyBuffs(partyNum)
-            UpdatePartyDebuffs(partyNum)
-        elseif event == "GROUP_ROSTER_UPDATE" then
-            UpdatePartyFrame(partyNum)
-            UpdatePartyBuffs(partyNum)
-            UpdatePartyDebuffs(partyNum)
-        elseif eventUnit == "party"..partyNum then
-            UpdatePartyFrame(partyNum)
+
+    frame:SetScript("OnEvent", function(self, event)
+        UpdatePartyFrame(partyNum)
+        if event == "GROUP_ROSTER_UPDATE" then
+            RefreshAuras(self)
         end
     end)
-    
-    if not InCombatLockdown() then
-        RegisterUnitWatch(frame)
-    end
     
     -- Drop shadow background
     frame.shadow = frame:CreateTexture(nil, "BACKGROUND")
@@ -1860,267 +1555,22 @@ function CreatePartyFrame(partyNum)
     frame.name:SetJustifyH("LEFT")
     frame.name:SetText("Party "..partyNum)
     
-    -- Buffs container (right side, growing rightward)
-    frame.buffs = {}
-    for i = 1, 15 do
-        local buff = CreateFrame("Frame", nil, frame)
-        buff:SetSize(18, 18)
-        
-        local col = (i - 1) % 5
-        local row = math.floor((i - 1) / 5)
-        buff:SetPoint("BOTTOMLEFT", frame.powerBar, "BOTTOMRIGHT", 2 + col * 20, row * 20)
-        
-        buff.icon = buff:CreateTexture(nil, "ARTWORK")
-        buff.icon:SetAllPoints()
-        buff.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
-        
-        buff.border = buff:CreateTexture(nil, "OVERLAY")
-        buff.border:SetAllPoints()
-        buff.border:SetTexture("Interface\\Buttons\\UI-Debuff-Overlays")
-        buff.border:SetTexCoord(0.296875, 0.5703125, 0, 0.515625)
-        
-        buff.count = buff:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
-        buff.count:SetPoint("BOTTOMRIGHT", 2, 0)
-        buff.count:SetFont(font, 10, "OUTLINE")
-        buff.count:SetTextColor(1, 1, 1)
-        
-        buff.cooldown = CreateFrame("Cooldown", nil, buff, "CooldownFrameTemplate")
-        buff.cooldown:SetAllPoints()
-        buff.cooldown:SetDrawEdge(false)
-        buff.cooldown:SetDrawSwipe(true)
-        buff.cooldown:SetReverse(true)
-        buff.cooldown:SetHideCountdownNumbers(true)
-        
-        -- Mouse-over tooltip (always active; setting checked live so config toggle takes effect)
-        buff:EnableMouse(true)
-        buff:SetScript("OnEnter", function(self)
-            if self.auraInstanceID and not GameTooltip:IsForbidden() and JarUnitFramesDB.enableAuraTooltips then
-                pcall(function()
-                    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                    GameTooltip:SetUnitAuraByAuraInstanceID("party"..partyNum, self.auraInstanceID)
-                    GameTooltip:Show()
-                end)
-            end
-        end)
-        buff:SetScript("OnLeave", function()
-            if not GameTooltip:IsForbidden() then
-                GameTooltip:Hide()
-            end
-        end)
-        
-        buff:Hide()
-        frame.buffs[i] = buff
-    end
-    
-    -- Debuffs container (left side, growing leftward)
-    frame.debuffs = {}
-    for i = 1, 15 do
-        local debuff = CreateFrame("Frame", nil, frame)
-        debuff:SetSize(18, 18)
-        
-        local col = (i - 1) % 5
-        local row = math.floor((i - 1) / 5)
-        debuff:SetPoint("BOTTOMRIGHT", frame.powerBar, "BOTTOMLEFT", -2 - col * 20, row * 20)
-        
-        debuff.icon = debuff:CreateTexture(nil, "ARTWORK")
-        debuff.icon:SetAllPoints()
-        debuff.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
-        
-        debuff.border = debuff:CreateTexture(nil, "OVERLAY")
-        debuff.border:SetAllPoints()
-        debuff.border:SetTexture("Interface\\Buttons\\UI-Debuff-Overlays")
-        debuff.border:SetTexCoord(0.296875, 0.5703125, 0, 0.515625)
-        
-        debuff.count = debuff:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
-        debuff.count:SetPoint("BOTTOMRIGHT", 2, 0)
-        
-        debuff.cooldown = CreateFrame("Cooldown", nil, debuff, "CooldownFrameTemplate")
-        debuff.cooldown:SetAllPoints()
-        debuff.cooldown:SetDrawEdge(false)
-        debuff.cooldown:SetDrawSwipe(true)
-        debuff.cooldown:SetReverse(true)
-        debuff.cooldown:SetHideCountdownNumbers(true)
-        
-        debuff:EnableMouse(true)
-        debuff:SetScript("OnEnter", function(self)
-            if self.auraInstanceID then
-                pcall(function()
-                    GameTooltip:SetOwner(self, "ANCHOR_LEFT")
-                    GameTooltip:SetUnitDebuffByAuraInstanceID("party"..partyNum, self.auraInstanceID)
-                    GameTooltip:Show()
-                end)
-            end
-        end)
-        debuff:SetScript("OnLeave", function() GameTooltip:Hide() end)
-        
-        debuff:Hide()
-        frame.debuffs[i] = debuff
-    end
-    
-    frame:Hide()
+    -- Buffs grow right off the power bar, debuffs grow left
+    frame.buffRow = CreateAuraRow(frame, {
+        unit = "party"..partyNum, filter = JarUnitFramesDB.partyShowOnlyMyBuffs and "HELPFUL|PLAYER" or "HELPFUL",
+        isBuff = true, max = 15,
+        size = 18, perRow = 5, bordered = true, stacks = true,
+        point = "BOTTOMLEFT", relTo = frame.powerBar, relPoint = "BOTTOMRIGHT", x = 2, y = 0, growX = 1, growY = 1,
+    })
+    frame.debuffRow = CreateAuraRow(frame, {
+        unit = "party"..partyNum, filter = JarUnitFramesDB.partyDebuffFilter or "HARMFUL|RAID", bossFirst = true,
+        max = 15,
+        size = 18, perRow = 5, bordered = true, stacks = true, tooltip = "ANCHOR_LEFT",
+        point = "BOTTOMRIGHT", relTo = frame.powerBar, relPoint = "BOTTOMLEFT", x = -2, y = 0, growX = -1, growY = 1,
+    })
+
+    UpdateFrameFonts(frame)
     return frame
-end
-
--- Update player buffs
-function UpdatePlayerBuffs()
-    if not playerFrame or not playerFrame.buffs then return end
-    
-    -- Use GetUnitAuras for more efficient batch retrieval
-    local auras = C_UnitAuras.GetUnitAuras("player", "HELPFUL", 40) or {}
-    local buffIndex = 1
-    
-    for _, auraData in ipairs(auras) do
-        if buffIndex > 40 then break end
-        
-        -- Skip permanent buffs if option is enabled (only check out of combat to avoid secret value errors)
-        local skipBuff = false
-        if JarUnitFramesDB.hidePlayerPermanentBuffs and not UnitAffectingCombat("player") then
-            local hasTimer = auraData.expirationTime and auraData.expirationTime > 0
-            skipBuff = not hasTimer
-        end
-        
-        if not skipBuff then
-            local buff = playerFrame.buffs[buffIndex]
-            buff.icon:SetTexture(auraData.icon)
-            buff.auraInstanceID = auraData.auraInstanceID
-            
-            -- Show stack count (SetText handles secret values safely)
-            buff.count:SetText(C_UnitAuras.GetAuraApplicationDisplayCount("player", auraData.auraInstanceID, 2, 99))
-            
-            -- Update cooldown spiral
-            if buff.cooldown then buff.cooldown:Hide() end
-
-            buff:Show()
-            buffIndex = buffIndex + 1
-        end
-    end
-
-    -- Hide unused buff frames
-    for i = buffIndex, 40 do
-        playerFrame.buffs[i]:Hide()
-    end
-end
-
--- Update target buffs (only for friendly targets)
-function UpdateTargetBuffs()
-    if not targetFrame or not targetFrame.buffs then return end
-
-    -- Hide all buffs if no target
-    if not UnitExists("target") then
-        for i = 1, 40 do
-            targetFrame.buffs[i]:Hide()
-        end
-        return
-    end
-
-    -- Use GetUnitAuras for more efficient batch retrieval
-    local auras = C_UnitAuras.GetUnitAuras("target", "HELPFUL", 40) or {}
-    local buffIndex = 1
-
-    for _, auraData in ipairs(auras) do
-        if buffIndex > 40 then break end
-
-        -- Skip permanent buffs if option is enabled (only check out of combat to avoid secret value errors)
-        local skipBuff = false
-        if JarUnitFramesDB.hideTargetPermanentBuffs and not UnitAffectingCombat("player") then
-            local hasTimer = auraData.expirationTime and auraData.expirationTime > 0
-            skipBuff = not hasTimer
-        end
-
-        if not skipBuff then
-            local buff = targetFrame.buffs[buffIndex]
-            buff.icon:SetTexture(auraData.icon)
-            buff.auraInstanceID = auraData.auraInstanceID
-
-            -- Show stack count (SetText handles secret values safely)
-            buff.count:SetText(C_UnitAuras.GetAuraApplicationDisplayCount("target", auraData.auraInstanceID, 2, 99))
-
-            -- Update cooldown spiral
-            if buff.cooldown then buff.cooldown:Hide() end
-            
-            buff:Show()
-            buffIndex = buffIndex + 1
-        end
-    end
-    
-    -- Hide unused buff frames
-    for i = buffIndex, 40 do
-        targetFrame.buffs[i]:Hide()
-    end
-end
-
--- Update player debuffs
-function UpdatePlayerDebuffs()
-    if not playerFrame or not playerFrame.debuffs then return end
-    
-    local filter = JarUnitFramesDB.playerDebuffFilter or "HARMFUL"
-    local maxShow = JarUnitFramesDB.playerMaxDebuffs or 40
-    local auras = C_UnitAuras.GetUnitAuras("player", filter, 40) or {}
-    SortBossAurasFirst(auras)
-    local debuffIndex = 1
-    
-    for _, auraData in ipairs(auras) do
-        if debuffIndex > maxShow then break end
-        
-        local debuff = playerFrame.debuffs[debuffIndex]
-        debuff.icon:SetTexture(auraData.icon)
-        debuff.auraInstanceID = auraData.auraInstanceID
-        
-        -- Show stack count (SetText handles secret values safely)
-        debuff.count:SetText(C_UnitAuras.GetAuraApplicationDisplayCount("player", auraData.auraInstanceID, 2, 99))
-
-        -- Update cooldown spiral
-        if debuff.cooldown then debuff.cooldown:Hide() end
-
-        debuff:Show()
-        debuffIndex = debuffIndex + 1
-    end
-
-    -- Hide unused debuff frames
-    for i = debuffIndex, 40 do
-        playerFrame.debuffs[i]:Hide()
-    end
-end
-
--- Update target debuffs (with position swapping for enemies)
-function UpdateTargetDebuffs()
-    if not targetFrame or not targetFrame.debuffs then return end
-
-    -- Hide all debuffs if no target
-    if not UnitExists("target") then
-        for i = 1, 40 do
-            targetFrame.debuffs[i]:Hide()
-        end
-        return
-    end
-
-    local filter = JarUnitFramesDB.targetDebuffFilter or "HARMFUL"
-    local maxShow = JarUnitFramesDB.targetMaxDebuffs or 40
-    local auras = C_UnitAuras.GetUnitAuras("target", filter, 40) or {}
-    SortBossAurasFirst(auras)
-    local debuffIndex = 1
-
-    for _, auraData in ipairs(auras) do
-        if debuffIndex > maxShow then break end
-
-        local debuff = targetFrame.debuffs[debuffIndex]
-        debuff.icon:SetTexture(auraData.icon)
-        debuff.auraInstanceID = auraData.auraInstanceID
-
-        -- Show stack count (SetText handles secret values safely)
-        debuff.count:SetText(C_UnitAuras.GetAuraApplicationDisplayCount("target", auraData.auraInstanceID, 2, 99))
-
-        -- Update cooldown spiral
-        if debuff.cooldown then debuff.cooldown:Hide() end
-        
-        debuff:Show()
-        debuffIndex = debuffIndex + 1
-    end
-    
-    -- Hide unused debuff frames
-    for i = debuffIndex, 40 do
-        targetFrame.debuffs[i]:Hide()
-    end
 end
 
 -- Update player frame
@@ -2189,18 +1639,11 @@ end
 function UpdateTargetFrame()
     if not targetFrame then return end
     
-    -- Check if we have a target
-    if not UnitExists("target") then
-        targetFrame:Hide()
-        return
-    end
-    
-    targetFrame:Show()
-    
-    -- Get target name (SECRET in combat for non-player units!)
-    -- FontString:SetText() accepts secret values via Secret Aspects
-    local name = UnitName("target")
-    targetFrame.name:SetText(name or "Unknown")
+    -- unit watch does show/hide now
+    if not UnitExists("target") then return end
+
+    -- name can be secret, pass it straight thru
+    targetFrame.name:SetText(UnitName("target"))
     
     -- Update level if enabled
     if JarUnitFramesDB.showLevel and UnitLevel("target") then
@@ -2242,9 +1685,8 @@ function UpdateTargetFrame()
     
     -- Color by class if player, otherwise by reaction
     if UnitIsPlayer("target") then
-        local _, class = UnitClass("target")
-        if class and RAID_CLASS_COLORS[class] then
-            local classColor = RAID_CLASS_COLORS[class]
+        local classColor = GetUnitClassColor("target")
+        if classColor then
             targetFrame.healthBar:SetStatusBarColor(classColor.r, classColor.g, classColor.b)
             targetFrame.healthBar:SetStatusBarDesaturated(false)
             targetFrame.healthBar.bg:SetVertexColor(classColor.r * 0.3, classColor.g * 0.3, classColor.b * 0.3)
@@ -2271,89 +1713,13 @@ function UpdateTargetFrame()
     end
 end
 
--- Update focus buffs
-function UpdateFocusBuffs()
-    if not focusFrame or not focusFrame.buffs then return end
-    
-    -- Hide all buffs if disabled or no focus
-    if not JarUnitFramesDB.focusShowBuffs or not UnitExists("focus") then
-        for i = 1, 40 do
-            focusFrame.buffs[i]:Hide()
-        end
-        return
-    end
-    
-    local auras = C_UnitAuras.GetUnitAuras("focus", "HELPFUL", 40) or {}
-    local buffIndex = 1
-    
-    for _, auraData in ipairs(auras) do
-        if buffIndex > 40 then break end
-        
-        local buff = focusFrame.buffs[buffIndex]
-        buff.icon:SetTexture(auraData.icon)
-        buff.auraInstanceID = auraData.auraInstanceID
-        buff.count:SetText("")
-        
-        buff:Show()
-        buffIndex = buffIndex + 1
-    end
-    
-    -- Hide unused buff frames
-    for i = buffIndex, 40 do
-        focusFrame.buffs[i]:Hide()
-    end
-end
-
--- Update focus debuffs
-function UpdateFocusDebuffs()
-    if not focusFrame or not focusFrame.debuffs then return end
-    
-    -- Hide all debuffs if disabled or no focus
-    if not JarUnitFramesDB.focusShowDebuffs or not UnitExists("focus") then
-        for i = 1, 40 do
-            focusFrame.debuffs[i]:Hide()
-        end
-        return
-    end
-    
-    local filter = JarUnitFramesDB.focusDebuffFilter or "HARMFUL|RAID"
-    local auras = C_UnitAuras.GetUnitAuras("focus", filter, 40) or {}
-    SortBossAurasFirst(auras)
-    local debuffIndex = 1
-    
-    for _, auraData in ipairs(auras) do
-        if debuffIndex > 40 then break end
-        
-        local debuff = focusFrame.debuffs[debuffIndex]
-        debuff.icon:SetTexture(auraData.icon)
-        debuff.auraInstanceID = auraData.auraInstanceID
-        debuff.count:SetText("")
-        
-        debuff:Show()
-        debuffIndex = debuffIndex + 1
-    end
-    
-    -- Hide unused debuff frames
-    for i = debuffIndex, 40 do
-        focusFrame.debuffs[i]:Hide()
-    end
-end
-
 -- Update focus frame
 function UpdateFocusFrame()
     if not focusFrame then return end
     
-    -- Check if we have a focus
-    if not UnitExists("focus") then
-        focusFrame:Hide()
-        return
-    end
-    
-    focusFrame:Show()
-    
-    -- Get focus name
-    local name = UnitName("focus")
-    focusFrame.name:SetText(name or "Unknown")
+    if not UnitExists("focus") then return end
+
+    focusFrame.name:SetText(UnitName("focus"))
     
     -- Update level if enabled
     if JarUnitFramesDB.showLevel and UnitLevel("focus") then
@@ -2387,9 +1753,8 @@ function UpdateFocusFrame()
     
     -- Color health bar by class/reaction
     if UnitIsPlayer("focus") then
-        local _, class = UnitClass("focus")
-        if class and RAID_CLASS_COLORS[class] then
-            local classColor = RAID_CLASS_COLORS[class]
+        local classColor = GetUnitClassColor("focus")
+        if classColor then
             focusFrame.healthBar:SetStatusBarColor(classColor.r, classColor.g, classColor.b)
             focusFrame.healthBar.bg:SetVertexColor(classColor.r * 0.3, classColor.g * 0.3, classColor.b * 0.3)
         else
@@ -2413,95 +1778,14 @@ function UpdateFocusFrame()
     end
 end
 
--- Update target of target buffs
-function UpdateTargetTargetBuffs()
-    if not targetTargetFrame or not targetTargetFrame.buffs then return end
-    
-    -- Hide all buffs if disabled or no targettarget
-    if not JarUnitFramesDB.totShowBuffs or not UnitExists("targettarget") then
-        for i = 1, 20 do
-            targetTargetFrame.buffs[i]:Hide()
-        end
-        return
-    end
-    
-    local auras = C_UnitAuras.GetUnitAuras("targettarget", "HELPFUL", 20) or {}
-    local buffIndex = 1
-    
-    for _, auraData in ipairs(auras) do
-        if buffIndex > 20 then break end
-        
-        local buff = targetTargetFrame.buffs[buffIndex]
-        buff.icon:SetTexture(auraData.icon)
-        buff.auraInstanceID = auraData.auraInstanceID
-        buff.count:SetText("")
-        
-        buff:Show()
-        buffIndex = buffIndex + 1
-    end
-    
-    -- Hide unused buff frames
-    for i = buffIndex, 20 do
-        targetTargetFrame.buffs[i]:Hide()
-    end
-end
-
--- Update target of target debuffs
-function UpdateTargetTargetDebuffs()
-    if not targetTargetFrame or not targetTargetFrame.debuffs then return end
-    
-    -- Hide all debuffs if disabled or no targettarget
-    if not JarUnitFramesDB.totShowDebuffs or not UnitExists("targettarget") then
-        for i = 1, 20 do
-            targetTargetFrame.debuffs[i]:Hide()
-        end
-        return
-    end
-    
-    local filter = JarUnitFramesDB.totDebuffFilter or "HARMFUL|RAID"
-    local auras = C_UnitAuras.GetUnitAuras("targettarget", filter, 20) or {}
-    SortBossAurasFirst(auras)
-    local debuffIndex = 1
-    
-    for _, auraData in ipairs(auras) do
-        if debuffIndex > 20 then break end
-        
-        local debuff = targetTargetFrame.debuffs[debuffIndex]
-        debuff.icon:SetTexture(auraData.icon)
-        debuff.auraInstanceID = auraData.auraInstanceID
-        debuff.count:SetText("")
-        
-        debuff:Show()
-        debuffIndex = debuffIndex + 1
-    end
-    
-    -- Hide unused debuff frames
-    for i = debuffIndex, 20 do
-        targetTargetFrame.debuffs[i]:Hide()
-    end
-end
-
 -- Update target of target frame
 function UpdateTargetTargetFrame()
     if not targetTargetFrame then return end
     
-    -- Check if the frame is disabled in settings
-    if not JarUnitFramesDB.showTargetTargetFrame then
-        targetTargetFrame:Hide()
-        return
-    end
-    
-    -- Check if we have a targettarget
-    if not UnitExists("targettarget") then
-        targetTargetFrame:Hide()
-        return
-    end
-    
-    targetTargetFrame:Show()
-    
-    -- Get targettarget name
-    local name = UnitName("targettarget")
-    targetTargetFrame.name:SetText(name or "Unknown")
+    -- unit watch handles visibility
+    if not UnitExists("targettarget") then return end
+
+    targetTargetFrame.name:SetText(UnitName("targettarget"))
     
     -- Get health values
     local health = UnitHealth("targettarget")
@@ -2528,9 +1812,8 @@ function UpdateTargetTargetFrame()
     
     -- Color health bar by class/reaction
     if UnitIsPlayer("targettarget") then
-        local _, class = UnitClass("targettarget")
-        if class and RAID_CLASS_COLORS[class] then
-            local classColor = RAID_CLASS_COLORS[class]
+        local classColor = GetUnitClassColor("targettarget")
+        if classColor then
             targetTargetFrame.healthBar:SetStatusBarColor(classColor.r, classColor.g, classColor.b)
             targetTargetFrame.healthBar.bg:SetVertexColor(classColor.r * 0.3, classColor.g * 0.3, classColor.b * 0.3)
         else
@@ -2554,89 +1837,13 @@ function UpdateTargetTargetFrame()
     end
 end
 
--- Update pet buffs
-function UpdatePetBuffs()
-    if not petFrame or not petFrame.buffs then return end
-    
-    -- Hide all buffs if disabled or no pet
-    if not JarUnitFramesDB.petShowBuffs or not UnitExists("pet") then
-        for i = 1, 20 do
-            petFrame.buffs[i]:Hide()
-        end
-        return
-    end
-    
-    local auras = C_UnitAuras.GetUnitAuras("pet", "HELPFUL", 20) or {}
-    local buffIndex = 1
-    
-    for _, auraData in ipairs(auras) do
-        if buffIndex > 20 then break end
-        
-        local buff = petFrame.buffs[buffIndex]
-        buff.icon:SetTexture(auraData.icon)
-        buff.auraInstanceID = auraData.auraInstanceID
-        buff.count:SetText("")
-        
-        buff:Show()
-        buffIndex = buffIndex + 1
-    end
-    
-    -- Hide unused buff frames
-    for i = buffIndex, 20 do
-        petFrame.buffs[i]:Hide()
-    end
-end
-
--- Update pet debuffs
-function UpdatePetDebuffs()
-    if not petFrame or not petFrame.debuffs then return end
-    
-    -- Hide all debuffs if disabled or no pet
-    if not JarUnitFramesDB.petShowDebuffs or not UnitExists("pet") then
-        for i = 1, 20 do
-            petFrame.debuffs[i]:Hide()
-        end
-        return
-    end
-    
-    local filter = JarUnitFramesDB.petDebuffFilter or "HARMFUL"
-    local auras = C_UnitAuras.GetUnitAuras("pet", filter, 20) or {}
-    SortBossAurasFirst(auras)
-    local debuffIndex = 1
-    
-    for _, auraData in ipairs(auras) do
-        if debuffIndex > 20 then break end
-        
-        local debuff = petFrame.debuffs[debuffIndex]
-        debuff.icon:SetTexture(auraData.icon)
-        debuff.auraInstanceID = auraData.auraInstanceID
-        debuff.count:SetText("")
-        
-        debuff:Show()
-        debuffIndex = debuffIndex + 1
-    end
-    
-    -- Hide unused debuff frames
-    for i = debuffIndex, 20 do
-        petFrame.debuffs[i]:Hide()
-    end
-end
-
 -- Update pet frame
 function UpdatePetFrame()
     if not petFrame then return end
     
-    -- Check if we have a pet
-    if not UnitExists("pet") then
-        petFrame:Hide()
-        return
-    end
-    
-    petFrame:Show()
-    
-    -- Get pet name
-    local name = UnitName("pet")
-    petFrame.name:SetText(name or "Unknown")
+    if not UnitExists("pet") then return end
+
+    petFrame.name:SetText(UnitName("pet"))
     
     -- Get health values
     local health = UnitHealth("pet")
@@ -2705,31 +1912,6 @@ function RepositionPartyFrames()
                 f.powerBar:SetWidth(width)
             end
             
-            -- Reanchor buffs and debuffs (they're positioned relative to power bar edges)
-            -- Buffs grow right from power bar right edge
-            if f.buffs then
-                for j = 1, 15 do
-                    if f.buffs[j] then
-                        f.buffs[j]:ClearAllPoints()
-                        local col = (j - 1) % 5
-                        local row = math.floor((j - 1) / 5)
-                        f.buffs[j]:SetPoint("BOTTOMLEFT", f.powerBar, "BOTTOMRIGHT", 2 + col * 20, row * 20)
-                    end
-                end
-            end
-            
-            -- Debuffs grow left from power bar left edge
-            if f.debuffs then
-                for j = 1, 15 do
-                    if f.debuffs[j] then
-                        f.debuffs[j]:ClearAllPoints()
-                        local col = (j - 1) % 5
-                        local row = math.floor((j - 1) / 5)
-                        f.debuffs[j]:SetPoint("BOTTOMRIGHT", f.powerBar, "BOTTOMLEFT", -2 - col * 20, row * 20)
-                    end
-                end
-            end
-            
             -- Position frames 2-4 below the previous frame with padding
             if i > 1 then
                 f:SetPoint("TOPLEFT", partyFrames[i-1], "BOTTOMLEFT", 0, -padding)
@@ -2751,8 +1933,7 @@ function UpdatePartyFrame(partyNum)
     end
     
     -- Update name
-    local name = UnitName(unit)
-    frame.name:SetText(name or "Unknown")
+    frame.name:SetText(UnitName(unit))
     
     -- Get health values (secret values)
     local health = UnitHealth(unit)
@@ -2783,9 +1964,8 @@ function UpdatePartyFrame(partyNum)
     -- Color by class if player
     local colored = false
     if UnitIsPlayer(unit) then
-        local _, class = UnitClass(unit)
-        if class and RAID_CLASS_COLORS[class] then
-            local classColor = RAID_CLASS_COLORS[class]
+        local classColor = GetUnitClassColor(unit)
+        if classColor then
             frame.healthBar:SetStatusBarColor(classColor.r, classColor.g, classColor.b)
             frame.healthBar:SetStatusBarDesaturated(false)
             frame.healthBar.bg:SetVertexColor(classColor.r * 0.3, classColor.g * 0.3, classColor.b * 0.3)
@@ -2806,92 +1986,6 @@ function UpdatePartyFrame(partyNum)
             frame.healthBar:SetStatusBarColor(1, 1, 0)
             frame.healthBar.bg:SetVertexColor(0.3, 0.3, 0)
         end
-    end
-end
-
--- Update party buffs
-function UpdatePartyBuffs(partyNum)
-    local frame = partyFrames[partyNum]
-    if not frame or not frame.buffs then return end
-    
-    local unit = "party"..partyNum
-    
-    -- Hide all buffs if no unit
-    if not UnitExists(unit) then
-        for i = 1, 15 do
-            frame.buffs[i]:Hide()
-        end
-        return
-    end
-    
-    -- Use PLAYER filter if option enabled (like raid frames)
-    local filter = JarUnitFramesDB.partyShowOnlyMyBuffs and "HELPFUL|PLAYER" or "HELPFUL"
-    local auras = C_UnitAuras.GetUnitAuras(unit, filter, 15) or {}
-    local buffIndex = 1
-    
-    for _, auraData in ipairs(auras) do
-        if buffIndex > 15 then break end
-        
-        local buff = frame.buffs[buffIndex]
-        buff.icon:SetTexture(auraData.icon)
-        buff.auraInstanceID = auraData.auraInstanceID
-        
-        -- Show stack count (SetText handles secret values safely)
-        buff.count:SetText(C_UnitAuras.GetAuraApplicationDisplayCount(unit, auraData.auraInstanceID, 2, 99))
-        
-        -- Update cooldown
-        if buff.cooldown then buff.cooldown:Hide() end
-        
-        buff:Show()
-        buffIndex = buffIndex + 1
-    end
-    
-    -- Hide unused buff frames
-    for i = buffIndex, 15 do
-        frame.buffs[i]:Hide()
-    end
-end
-
--- Update party debuffs
-function UpdatePartyDebuffs(partyNum)
-    local frame = partyFrames[partyNum]
-    if not frame or not frame.debuffs then return end
-    
-    local unit = "party"..partyNum
-    
-    -- Hide all debuffs if no unit
-    if not UnitExists(unit) then
-        for i = 1, 15 do
-            frame.debuffs[i]:Hide()
-        end
-        return
-    end
-    
-    local filter = JarUnitFramesDB.partyDebuffFilter or "HARMFUL|RAID"
-    local auras = C_UnitAuras.GetUnitAuras(unit, filter, 15) or {}
-    SortBossAurasFirst(auras)
-    local debuffIndex = 1
-    
-    for _, auraData in ipairs(auras) do
-        if debuffIndex > 15 then break end
-        
-        local debuff = frame.debuffs[debuffIndex]
-        debuff.icon:SetTexture(auraData.icon)
-        debuff.auraInstanceID = auraData.auraInstanceID
-        
-        -- Show stack count (SetText handles secret values safely)
-        debuff.count:SetText(C_UnitAuras.GetAuraApplicationDisplayCount(unit, auraData.auraInstanceID, 2, 99))
-        
-        -- Update cooldown
-        if debuff.cooldown then debuff.cooldown:Hide() end
-        
-        debuff:Show()
-        debuffIndex = debuffIndex + 1
-    end
-    
-    -- Hide unused debuff frames
-    for i = debuffIndex, 15 do
-        frame.debuffs[i]:Hide()
     end
 end
 
@@ -3073,16 +2167,11 @@ local function CreateConfigFrame()
     AddCheck("Mirror Target Frame Position",
         function() return JarUnitFramesDB.mirrorTargetPosition end,
         function(v) JarUnitFramesDB.mirrorTargetPosition = v
-            if v and playerFrame and targetFrame then
-                local p = JarUnitFramesDB.playerPos
-                JarUnitFramesDB.targetPos = { point = p.point, x = -p.x, y = p.y }
-                targetFrame:ClearAllPoints()
-                targetFrame:SetPoint(p.point, UIParent, p.point, -p.x, p.y)
-            end
+            if v then MirrorTargetPosition() end
         end)
     AddCheck("Show Buff/Debuff Tooltips on Hover",
         function() return JarUnitFramesDB.enableAuraTooltips end,
-        function(v) JarUnitFramesDB.enableAuraTooltips = v end)
+        function(v) JarUnitFramesDB.enableAuraTooltips = v; ForEachUnitFrame(ApplyAuraTooltipSetting) end)
     AddCheck("Show Target Item Level",
         function() return JarUnitFramesDB.showTargetItemLevel end,
         function(v) JarUnitFramesDB.showTargetItemLevel = v
@@ -3096,11 +2185,7 @@ local function CreateConfigFrame()
         function(v)
             v = math.floor(v * 10 + 0.5) / 10
             JarUnitFramesDB.frameScale = v
-            if playerFrame then playerFrame:SetScale(v) end
-            if targetFrame then targetFrame:SetScale(v) end
-            if focusFrame then focusFrame:SetScale(v) end
-            if targetTargetFrame then targetTargetFrame:SetScale(v) end
-            if petFrame then petFrame:SetScale(v) end
+            ApplyFrameScale()
         end,
         function(v) return math.floor(v * 10 + 0.5) / 10 end)
     AddSlider("Background Opacity", 0, 100, 5,
@@ -3128,8 +2213,7 @@ local function CreateConfigFrame()
                 function() return JarUnitFramesDB.texture == path end,
                 function()
                     JarUnitFramesDB.texture = path
-                    if playerFrame then UpdateFrameTextures(playerFrame) end
-                    if targetFrame then UpdateFrameTextures(targetFrame) end
+                    ForEachUnitFrame(UpdateFrameTextures)
                 end)
         end
     end)
@@ -3143,8 +2227,7 @@ local function CreateConfigFrame()
                 function() return JarUnitFramesDB.font == path end,
                 function()
                     JarUnitFramesDB.font = path
-                    if playerFrame then UpdateFrameFonts(playerFrame) end
-                    if targetFrame then UpdateFrameFonts(targetFrame) end
+                    ForEachUnitFrame(UpdateFrameFonts)
                 end)
         end
     end)
@@ -3158,18 +2241,20 @@ local function CreateConfigFrame()
     filterSub:SetTextColor(unpack(UI_PALETTE.textDim))
     filterSub:SetText("Debuff Filters  (click to cycle)")
     NextY(8)
-    AddFilterCycler("Player:", "playerDebuffFilter", UpdatePlayerDebuffs)
-    AddFilterCycler("Target:", "targetDebuffFilter", UpdateTargetDebuffs)
-    AddFilterCycler("Focus:",  "focusDebuffFilter",  UpdateFocusDebuffs)
-    AddFilterCycler("Party:",  "partyDebuffFilter",  function() for i=1,4 do UpdatePartyDebuffs(i) end end)
+    AddFilterCycler("Player:", "playerDebuffFilter", function() SetAuraRowFilter(playerFrame and playerFrame.debuffRow, JarUnitFramesDB.playerDebuffFilter) end)
+    AddFilterCycler("Target:", "targetDebuffFilter", function() SetAuraRowFilter(targetFrame and targetFrame.debuffRow, JarUnitFramesDB.targetDebuffFilter) end)
+    AddFilterCycler("Focus:",  "focusDebuffFilter",  function() SetAuraRowFilter(focusFrame and focusFrame.debuffRow, JarUnitFramesDB.focusDebuffFilter) end)
+    AddFilterCycler("Party:",  "partyDebuffFilter",  function()
+        for i = 1, 4 do SetAuraRowFilter(partyFrames[i] and partyFrames[i].debuffRow, JarUnitFramesDB.partyDebuffFilter) end
+    end)
     NextY(10)
     AddSlider("Player Max Debuffs", 5, 40, 1,
         function() return JarUnitFramesDB.playerMaxDebuffs or 40 end,
-        function(v) JarUnitFramesDB.playerMaxDebuffs = v; UpdatePlayerDebuffs() end,
+        function(v) JarUnitFramesDB.playerMaxDebuffs = v; SetAuraRowMax(playerFrame and playerFrame.debuffRow, v) end,
         function(v) return math.floor(v + 0.5) end)
     AddSlider("Target Max Debuffs", 5, 40, 1,
         function() return JarUnitFramesDB.targetMaxDebuffs or 40 end,
-        function(v) JarUnitFramesDB.targetMaxDebuffs = v; UpdateTargetDebuffs() end,
+        function(v) JarUnitFramesDB.targetMaxDebuffs = v; SetAuraRowMax(targetFrame and targetFrame.debuffRow, v) end,
         function(v) return math.floor(v + 0.5) end)
 
     -- ═══════════════════════════════════════════════
@@ -3178,26 +2263,19 @@ local function CreateConfigFrame()
     AddHeader("Focus Frame")
     AddCheck("Show Focus Frame",
         function() return JarUnitFramesDB.showFocusFrame end,
-        function(v) JarUnitFramesDB.showFocusFrame = v
-            if v then
-                if not focusFrame then focusFrame = CreateFocusFrame(); UpdateFocusFrame(); UpdateFocusBuffs(); UpdateFocusDebuffs()
-                else focusFrame:Show() end
-            else if focusFrame then focusFrame:Hide() end end
-        end)
+        function(v) JarUnitFramesDB.showFocusFrame = v; SetupFrames() end)
     AddCheck("Show Focus Buffs",
         function() return JarUnitFramesDB.focusShowBuffs end,
-        function(v) JarUnitFramesDB.focusShowBuffs = v
-            if focusFrame and focusFrame.buffs then if v then UpdateFocusBuffs() else for i=1,40 do focusFrame.buffs[i]:Hide() end end end
-        end)
+        function(v) JarUnitFramesDB.focusShowBuffs = v; SetAuraRowShown(focusFrame and focusFrame.buffRow, v) end)
     AddCheck("Show Focus Debuffs",
         function() return JarUnitFramesDB.focusShowDebuffs end,
-        function(v) JarUnitFramesDB.focusShowDebuffs = v
-            if focusFrame and focusFrame.debuffs then if v then UpdateFocusDebuffs() else for i=1,40 do focusFrame.debuffs[i]:Hide() end end end
-        end)
+        function(v) JarUnitFramesDB.focusShowDebuffs = v; SetAuraRowShown(focusFrame and focusFrame.debuffRow, v) end)
     AddSlider("Focus Width", 150, 300, 10,
         function() return JarUnitFramesDB.focusWidth or 220 end,
         function(v) v = math.floor(v / 10 + 0.5) * 10; JarUnitFramesDB.focusWidth = v
-            if focusFrame then focusFrame:SetWidth(v); focusFrame.healthBar:SetWidth(v); focusFrame.powerBar:SetWidth(v) end
+            if focusFrame then
+                RunWhenSafe("focusWidth", function() focusFrame:SetWidth(v); focusFrame.healthBar:SetWidth(v); focusFrame.powerBar:SetWidth(v) end)
+            end
         end,
         function(v) return math.floor(v / 10 + 0.5) * 10 end)
 
@@ -3207,37 +2285,19 @@ local function CreateConfigFrame()
     AddHeader("Target of Target")
     AddCheck("Show Target of Target Frame",
         function() return JarUnitFramesDB.showTargetTargetFrame end,
-        function(v) JarUnitFramesDB.showTargetTargetFrame = v
-            if v then
-                if not targetTargetFrame then
-                    targetTargetFrame = CreateTargetTargetFrame(); UpdateTargetTargetFrame()
-                    if JarUnitFramesDB.totShowBuffs then UpdateTargetTargetBuffs() end
-                    if JarUnitFramesDB.totShowDebuffs then UpdateTargetTargetDebuffs() end
-                else
-                    if not InCombatLockdown() then RegisterUnitWatch(targetTargetFrame) end
-                    targetTargetFrame:Show()
-                end
-            else
-                if targetTargetFrame then
-                    if not InCombatLockdown() then UnregisterUnitWatch(targetTargetFrame) end
-                    targetTargetFrame:Hide()
-                end
-            end
-        end)
+        function(v) JarUnitFramesDB.showTargetTargetFrame = v; SetupFrames() end)
     AddCheck("Show ToT Buffs",
         function() return JarUnitFramesDB.totShowBuffs end,
-        function(v) JarUnitFramesDB.totShowBuffs = v
-            if targetTargetFrame and targetTargetFrame.buffs then if v then UpdateTargetTargetBuffs() else for i=1,20 do targetTargetFrame.buffs[i]:Hide() end end end
-        end)
+        function(v) JarUnitFramesDB.totShowBuffs = v; SetAuraRowShown(targetTargetFrame and targetTargetFrame.buffRow, v) end)
     AddCheck("Show ToT Debuffs",
         function() return JarUnitFramesDB.totShowDebuffs end,
-        function(v) JarUnitFramesDB.totShowDebuffs = v
-            if targetTargetFrame and targetTargetFrame.debuffs then if v then UpdateTargetTargetDebuffs() else for i=1,20 do targetTargetFrame.debuffs[i]:Hide() end end end
-        end)
+        function(v) JarUnitFramesDB.totShowDebuffs = v; SetAuraRowShown(targetTargetFrame and targetTargetFrame.debuffRow, v) end)
     AddSlider("ToT Width", 100, 250, 10,
         function() return JarUnitFramesDB.totWidth or 150 end,
         function(v) v = math.floor(v / 10 + 0.5) * 10; JarUnitFramesDB.totWidth = v
-            if targetTargetFrame then targetTargetFrame:SetWidth(v); targetTargetFrame.healthBar:SetWidth(v); targetTargetFrame.powerBar:SetWidth(v) end
+            if targetTargetFrame then
+                RunWhenSafe("totWidth", function() targetTargetFrame:SetWidth(v); targetTargetFrame.healthBar:SetWidth(v); targetTargetFrame.powerBar:SetWidth(v) end)
+            end
         end,
         function(v) return math.floor(v / 10 + 0.5) * 10 end)
 
@@ -3247,28 +2307,19 @@ local function CreateConfigFrame()
     AddHeader("Pet Frame")
     AddCheck("Show Pet Frame",
         function() return JarUnitFramesDB.showPetFrame end,
-        function(v) JarUnitFramesDB.showPetFrame = v
-            if v then
-                if not petFrame then petFrame = CreatePetFrame(); UpdatePetFrame()
-                    if JarUnitFramesDB.petShowBuffs then UpdatePetBuffs() end
-                    if JarUnitFramesDB.petShowDebuffs then UpdatePetDebuffs() end
-                else petFrame:Show() end
-            else if petFrame then petFrame:Hide() end end
-        end)
+        function(v) JarUnitFramesDB.showPetFrame = v; SetupFrames() end)
     AddCheck("Show Pet Buffs",
         function() return JarUnitFramesDB.petShowBuffs end,
-        function(v) JarUnitFramesDB.petShowBuffs = v
-            if petFrame and petFrame.buffs then if v then UpdatePetBuffs() else for i=1,20 do petFrame.buffs[i]:Hide() end end end
-        end)
+        function(v) JarUnitFramesDB.petShowBuffs = v; SetAuraRowShown(petFrame and petFrame.buffRow, v) end)
     AddCheck("Show Pet Debuffs",
         function() return JarUnitFramesDB.petShowDebuffs end,
-        function(v) JarUnitFramesDB.petShowDebuffs = v
-            if petFrame and petFrame.debuffs then if v then UpdatePetDebuffs() else for i=1,20 do petFrame.debuffs[i]:Hide() end end end
-        end)
+        function(v) JarUnitFramesDB.petShowDebuffs = v; SetAuraRowShown(petFrame and petFrame.debuffRow, v) end)
     AddSlider("Pet Width", 100, 250, 10,
         function() return JarUnitFramesDB.petWidth or 150 end,
         function(v) v = math.floor(v / 10 + 0.5) * 10; JarUnitFramesDB.petWidth = v
-            if petFrame then petFrame:SetWidth(v); petFrame.healthBar:SetWidth(v); petFrame.powerBar:SetWidth(v) end
+            if petFrame then
+                RunWhenSafe("petWidth", function() petFrame:SetWidth(v); petFrame.healthBar:SetWidth(v); petFrame.powerBar:SetWidth(v) end)
+            end
         end,
         function(v) return math.floor(v / 10 + 0.5) * 10 end)
 
@@ -3279,39 +2330,23 @@ local function CreateConfigFrame()
     AddCheck("Show Party Frames",
         function() return JarUnitFramesDB.showPartyFrames end,
         function(v) JarUnitFramesDB.showPartyFrames = v
-            if v then
-                if CompactRaidFrameManager then CompactRaidFrameManager:UnregisterAllEvents(); CompactRaidFrameManager:Hide() end
-                if CompactPartyFrame then CompactPartyFrame:UnregisterAllEvents(); CompactPartyFrame:Hide() end
-                if CompactRaidFrameContainer then CompactRaidFrameContainer:UnregisterAllEvents(); CompactRaidFrameContainer:Hide() end
-                if not partyFrames[1] then
-                    for i=1,4 do partyFrames[i] = CreatePartyFrame(i) end
-                    RepositionPartyFrames()
-                    for i=1,4 do UpdatePartyFrame(i); UpdatePartyBuffs(i); UpdatePartyDebuffs(i) end
-                else
-                    for i=1,4 do if partyFrames[i] and not InCombatLockdown() then
-                        RegisterUnitWatch(partyFrames[i]); UpdatePartyFrame(i); UpdatePartyBuffs(i); UpdatePartyDebuffs(i)
-                    end end
-                end
-            else
-                for i=1,4 do if partyFrames[i] then
-                    if not InCombatLockdown() then UnregisterUnitWatch(partyFrames[i]) end
-                    partyFrames[i]:Hide()
-                end end
-                if CompactRaidFrameManager then pcall(CompactRaidFrameManager_OnLoad, CompactRaidFrameManager); CompactRaidFrameManager:Show() end
-                if CompactPartyFrame then CompactPartyFrame:Show() end
-                if CompactRaidFrameContainer then CompactRaidFrameContainer:Show() end
-            end
+            HideBlizzardPartyFrames()
+            SetupFrames()
+            -- blocked blizz frames cant be un-blocked without a reload
+            if not v then print("|cff00ff00Jar's Unit Frames|r /reload to get the Blizzard party frames back") end
         end)
     AddCheck("Show Only My Buffs",
         function() return JarUnitFramesDB.partyShowOnlyMyBuffs end,
-        function(v) JarUnitFramesDB.partyShowOnlyMyBuffs = v; for i=1,4 do UpdatePartyBuffs(i) end end)
+        function(v) JarUnitFramesDB.partyShowOnlyMyBuffs = v
+            for i = 1, 4 do SetAuraRowFilter(partyFrames[i] and partyFrames[i].buffRow, v and "HELPFUL|PLAYER" or "HELPFUL") end
+        end)
     AddSlider("Party Width", 100, 250, 10,
         function() return JarUnitFramesDB.partyWidth or 150 end,
-        function(v) v = math.floor(v / 10 + 0.5) * 10; JarUnitFramesDB.partyWidth = v; RepositionPartyFrames() end,
+        function(v) v = math.floor(v / 10 + 0.5) * 10; JarUnitFramesDB.partyWidth = v; RunWhenSafe("partyPos", RepositionPartyFrames) end,
         function(v) return math.floor(v / 10 + 0.5) * 10 end)
     AddSlider("Party Padding", 0, 20, 1,
         function() return JarUnitFramesDB.partyPadding or 5 end,
-        function(v) v = math.floor(v + 0.5); JarUnitFramesDB.partyPadding = v; RepositionPartyFrames() end,
+        function(v) v = math.floor(v + 0.5); JarUnitFramesDB.partyPadding = v; RunWhenSafe("partyPos", RepositionPartyFrames) end,
         function(v) return math.floor(v + 0.5) end)
 
     -- Set scroll child height
@@ -3323,51 +2358,83 @@ local function CreateConfigFrame()
     return frame
 end
 
--- Main update function
+-- Main update function, also polls ToT since it has no events
+local totTick = 0
 local function OnUpdate(self, elapsed)
     timeSinceLastUpdate = timeSinceLastUpdate + elapsed
-    
-    if timeSinceLastUpdate >= UPDATE_INTERVAL then
-        timeSinceLastUpdate = 0
-        
-        if JarUnitFramesDB.showPlayerFrame then
-            UpdatePlayerFrame()
-        end
-        
-        if JarUnitFramesDB.showTargetFrame then
-            UpdateTargetFrame()
+    if timeSinceLastUpdate < UPDATE_INTERVAL then return end
+    timeSinceLastUpdate = 0
+
+    if JarUnitFramesDB.showPlayerFrame then
+        UpdatePlayerFrame()
+    end
+
+    if JarUnitFramesDB.showTargetFrame then
+        UpdateTargetFrame()
+    end
+
+    if targetTargetFrame and JarUnitFramesDB.showTargetTargetFrame then
+        UpdateTargetTargetFrame()
+        totTick = totTick + 1
+        if totTick >= 5 then
+            totTick = 0
+            RefreshAuras(targetTargetFrame)
         end
     end
+end
+
+local function UpdateAllFrames()
+    UpdatePlayerFrame()
+    UpdateTargetFrame()
+    UpdateFocusFrame()
+    UpdateTargetTargetFrame()
+    UpdatePetFrame()
+    for i = 1, 4 do
+        UpdatePartyFrame(i)
+    end
+    ForEachUnitFrame(RefreshAuras)
+end
+
+-- create whatever is enabled (once) and set unit watches. queued in combat
+function SetupFrames()
+    RunWhenSafe("setup", function()
+        playerFrame = playerFrame or CreatePlayerFrame()
+        targetFrame = targetFrame or CreateTargetFrame()
+        if JarUnitFramesDB.showFocusFrame then
+            focusFrame = focusFrame or CreateFocusFrame()
+        end
+        if JarUnitFramesDB.showTargetTargetFrame then
+            targetTargetFrame = targetTargetFrame or CreateTargetTargetFrame()
+        end
+        if JarUnitFramesDB.showPetFrame then
+            petFrame = petFrame or CreatePetFrame()
+        end
+        if JarUnitFramesDB.showPartyFrames and not partyFrames[1] then
+            for i = 1, 4 do
+                partyFrames[i] = CreatePartyFrame(i)
+            end
+            RepositionPartyFrames()
+        end
+
+        SetFrameEnabled(playerFrame, JarUnitFramesDB.showPlayerFrame)
+        SetFrameEnabled(targetFrame, JarUnitFramesDB.showTargetFrame)
+        SetFrameEnabled(focusFrame, JarUnitFramesDB.showFocusFrame)
+        SetFrameEnabled(targetTargetFrame, JarUnitFramesDB.showTargetTargetFrame)
+        SetFrameEnabled(petFrame, JarUnitFramesDB.showPetFrame)
+        for i = 1, 4 do
+            SetFrameEnabled(partyFrames[i], JarUnitFramesDB.showPartyFrames)
+        end
+
+        UpdateAllFrames()
+    end)
 end
 
 -- Event handler
 local eventFrame = CreateFrame("Frame")
 eventFrame:RegisterEvent("PLAYER_LOGIN")
 eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
-eventFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
 eventFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
-
--- Hide Blizzard party frames (called on various events to keep them hidden)
-local function HideBlizzardPartyFrames()
-    if not JarUnitFramesDB.showPartyFrames then
-        return  -- Only hide if we're using custom party frames
-    end
-    
-    if CompactRaidFrameManager then
-        CompactRaidFrameManager:UnregisterAllEvents()
-        CompactRaidFrameManager:Hide()
-    end
-    
-    if CompactPartyFrame then
-        CompactPartyFrame:UnregisterAllEvents()
-        CompactPartyFrame:Hide()
-    end
-    
-    if CompactRaidFrameContainer then
-        CompactRaidFrameContainer:UnregisterAllEvents()
-        CompactRaidFrameContainer:Hide()
-    end
-end
+eventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
 
 eventFrame:SetScript("OnEvent", function(self, event, ...)
     if event == "PLAYER_LOGIN" then
@@ -3377,83 +2444,20 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
                 JarUnitFramesDB[key] = value
             end
         end
-        
+
+        -- NOT_SELF is gone in 12.1
+        for _, key in ipairs({ "playerDebuffFilter", "targetDebuffFilter", "focusDebuffFilter", "totDebuffFilter", "petDebuffFilter", "partyDebuffFilter" }) do
+            JarUnitFramesDB[key] = JarUnitFramesDB[key]:gsub("NOT_SELF", "!PLAYER")
+        end
+
         -- Load fonts from SharedMedia if available
         LoadSharedMediaFonts()
-        
+
         print("|cff00ff00Jar's Unit Frames|r loaded. Type /juf for options.")
-        
-        -- Hide default Blizzard unit frames properly (without causing taint)
-        -- Use a secure method to hide frames
-        if not InCombatLockdown() then
-            PlayerFrame:UnregisterAllEvents()
-            PlayerFrame:Hide()
-            
-            TargetFrame:UnregisterAllEvents()
-            TargetFrame:Hide()
-            
-            FocusFrame:UnregisterAllEvents()
-            FocusFrame:Hide()
-            
-            PetFrame:UnregisterAllEvents()
-            PetFrame:Hide()
-            
-            -- Hook to keep them hidden (use secure hook)
-            PlayerFrame:HookScript("OnShow", function(self) self:Hide() end)
-            TargetFrame:HookScript("OnShow", function(self) self:Hide() end)
-            FocusFrame:HookScript("OnShow", function(self) self:Hide() end)
-            PetFrame:HookScript("OnShow", function(self) self:Hide() end)
-        end
-        
-        -- Always hide Blizzard party frames and prevent them from showing
-        if CompactRaidFrameManager then
-            CompactRaidFrameManager:UnregisterAllEvents()
-            CompactRaidFrameManager:Hide()
-            CompactRaidFrameManager:SetParent(nil)
-            if not InCombatLockdown() then
-                CompactRaidFrameManager:HookScript("OnShow", function(self) self:Hide() end)
-            end
-        end
-        
-        if CompactPartyFrame then
-            CompactPartyFrame:UnregisterAllEvents()
-            CompactPartyFrame:Hide()
-            CompactPartyFrame:SetParent(nil)
-            if not InCombatLockdown() then
-                CompactPartyFrame:HookScript("OnShow", function(self) self:Hide() end)
-            end
-        end
-        
-        if CompactRaidFrameContainer then
-            CompactRaidFrameContainer:UnregisterAllEvents()
-            CompactRaidFrameContainer:Hide()
-            CompactRaidFrameContainer:SetParent(nil)
-            if not InCombatLockdown() then
-                CompactRaidFrameContainer:HookScript("OnShow", function(self) self:Hide() end)
-            end
-        end
-        
-        -- Create frames
-        playerFrame = CreatePlayerFrame()
-        targetFrame = CreateTargetFrame()
-        if JarUnitFramesDB.showFocusFrame then
-            focusFrame = CreateFocusFrame()
-        end
-        if JarUnitFramesDB.showTargetTargetFrame then
-            targetTargetFrame = CreateTargetTargetFrame()
-        end
-        if JarUnitFramesDB.showPetFrame then
-            petFrame = CreatePetFrame()
-        end
-        
-        -- Create party frames
-        if JarUnitFramesDB.showPartyFrames then
-            for i = 1, 4 do
-                partyFrames[i] = CreatePartyFrame(i)
-            end
-            -- Position party frames vertically
-            RepositionPartyFrames()
-        end
+
+        HideBlizzardUnitFrames()
+        HideBlizzardPartyFrames()
+        SetupFrames()
 
         -- Create config window
         local success, result = pcall(CreateConfigFrame)
@@ -3463,117 +2467,25 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
         else
             print("|cffff0000Jar's Unit Frames|r Error creating config frame: " .. tostring(result))
         end
-        
-        -- Set up update ticker (only if playerFrame was created)
-        if playerFrame then
-            playerFrame:SetScript("OnUpdate", OnUpdate)
-        end
-        
-        -- Initial update
-        UpdatePlayerFrame()
-        UpdatePlayerBuffs()
-        UpdatePlayerDebuffs()
-        UpdateTargetFrame()
-        UpdateTargetBuffs()
-        UpdateTargetDebuffs()
-        if focusFrame then
-            UpdateFocusFrame()
-            UpdateFocusBuffs()
-            UpdateFocusDebuffs()
-        end
-        if targetTargetFrame then
-            UpdateTargetTargetFrame()
-            if JarUnitFramesDB.totShowBuffs then
-                UpdateTargetTargetBuffs()
-            end
-            if JarUnitFramesDB.totShowDebuffs then
-                UpdateTargetTargetDebuffs()
-            end
-        end
-        if petFrame then
-            UpdatePetFrame()
-            if JarUnitFramesDB.petShowBuffs then
-                UpdatePetBuffs()
-            end
-            if JarUnitFramesDB.petShowDebuffs then
-                UpdatePetDebuffs()
-            end
-        end
-        
-        -- Update party frames
-        if JarUnitFramesDB.showPartyFrames then
-            for i = 1, 4 do
-                UpdatePartyFrame(i)
-                UpdatePartyBuffs(i)
-                UpdatePartyDebuffs(i)
-            end
-        end
-    
-    elseif event == "PLAYER_ENTERING_WORLD" then
-        -- Hide Blizzard party frames (may re-show on zone change)
-        if JarUnitFramesDB.showPartyFrames then
-            HideBlizzardPartyFrames()
-        end
-        
-        -- Initial full update
-        UpdatePlayerFrame()
-        UpdatePlayerBuffs()
-        UpdatePlayerDebuffs()
-        UpdateTargetFrame()
-        UpdateTargetBuffs()
-        UpdateTargetDebuffs()
-        if focusFrame then
-            UpdateFocusFrame()
-            UpdateFocusBuffs()
-            UpdateFocusDebuffs()
-        end
-        if targetTargetFrame then
-            UpdateTargetTargetFrame()
-            if JarUnitFramesDB.totShowBuffs then
-                UpdateTargetTargetBuffs()
-            end
-            if JarUnitFramesDB.totShowDebuffs then
-                UpdateTargetTargetDebuffs()
-            end
-        end
-        if petFrame then
-            UpdatePetFrame()
-            if JarUnitFramesDB.petShowBuffs then
-                UpdatePetBuffs()
-            end
-            if JarUnitFramesDB.petShowDebuffs then
-                UpdatePetDebuffs()
-            end
-        end
-        
-        -- Update party frames
-        if JarUnitFramesDB.showPartyFrames then
-            for i = 1, 4 do
-                UpdatePartyFrame(i)
-                UpdatePartyBuffs(i)
-                UpdatePartyDebuffs(i)
-            end
-        end
 
-    elseif event == "PLAYER_TARGET_CHANGED" then
-        -- Target changed, but frame events will handle the details
-        -- Just do an initial update
-        UpdateTargetFrame()
-        UpdateTargetBuffs()
-        
+        self:SetScript("OnUpdate", OnUpdate)
+
+    elseif event == "PLAYER_ENTERING_WORLD" then
+        HideBlizzardPartyFrames()
+        UpdateAllFrames()
+
     elseif event == "GROUP_ROSTER_UPDATE" then
-        -- Party composition changed, update all party frames
-        if JarUnitFramesDB.showPartyFrames then
-            for i = 1, 4 do
-                UpdatePartyFrame(i)
-                UpdatePartyBuffs(i)
-                UpdatePartyDebuffs(i)
-            end
-            -- Hide Blizzard frames (they may re-show when party changes)
-            HideBlizzardPartyFrames()
-        end
+        -- blizz party frames can come back when the group changes
+        HideBlizzardPartyFrames()
+
+    elseif event == "PLAYER_REGEN_ENABLED" then
+        FlushPending()
     end
 end)
+
+function JarsUnitFrames_OpenConfig()
+    if configFrame then configFrame:Show() end
+end
 
 -- Slash commands
 SLASH_JARUNITFRAMES1 = "/juf"
@@ -3593,21 +2505,8 @@ SlashCmdList["JARUNITFRAMES"] = function(msg)
         JarUnitFramesDB.showPlayerFrame = not JarUnitFramesDB.showPlayerFrame
         JarUnitFramesDB.showTargetFrame = not JarUnitFramesDB.showTargetFrame
         
-        if playerFrame then
-            playerFrame:SetShown(JarUnitFramesDB.showPlayerFrame)
-        end
-        if targetFrame then
-            targetFrame:SetShown(JarUnitFramesDB.showTargetFrame)
-        end
-        if focusFrame then
-            focusFrame:SetShown(JarUnitFramesDB.showFocusFrame)
-        end
-        if targetTargetFrame then
-            targetTargetFrame:SetShown(JarUnitFramesDB.showTargetTargetFrame)
-        end
-        if petFrame then
-            petFrame:SetShown(JarUnitFramesDB.showPetFrame)
-        end
+        -- unit watch on/off, queued if in combat
+        SetupFrames()
         
         print("|cff00ff00Jar's Unit Frames|r " .. (JarUnitFramesDB.showPlayerFrame and "shown" or "hidden"))
         
@@ -3618,21 +2517,7 @@ SlashCmdList["JARUNITFRAMES"] = function(msg)
         local scale = tonumber(msg:match("^scale%s+(.+)"))
         if scale and scale > 0.5 and scale < 3 then
             JarUnitFramesDB.frameScale = scale
-            if playerFrame then
-                playerFrame:SetScale(scale)
-            end
-            if targetFrame then
-                targetFrame:SetScale(scale)
-            end
-            if focusFrame then
-                focusFrame:SetScale(scale)
-            end
-            if targetTargetFrame then
-                targetTargetFrame:SetScale(scale)
-            end
-            if petFrame then
-                petFrame:SetScale(scale)
-            end
+            ApplyFrameScale()
             print("|cff00ff00Jar's Unit Frames|r scale set to " .. scale)
         else
             print("|cffff0000Error:|r Scale must be between 0.5 and 3.0")
@@ -3654,12 +2539,18 @@ SlashCmdList["JARUNITFRAMES"] = function(msg)
         end
         
     elseif msg == "buffs" then
-        -- List all current player buffs with their spell IDs
+        -- List all current player buffs with their spell IDs (secret in combat, so skip then)
+        if C_Secrets.ShouldAurasBeSecret() then
+            print("|cff00ff00Jar's Unit Frames|r Buffs are hidden right now (combat/instance), try again later")
+            return
+        end
         local auras = C_UnitAuras.GetUnitAuras("player", "HELPFUL", 40, nil, nil)
         print("|cff00ff00Jar's Unit Frames|r Current Buffs:")
         for i, auraData in ipairs(auras) do
-            local stacks = (auraData.applications and auraData.applications > 1) and (" x" .. auraData.applications) or ""
-            print("  " .. i .. ". " .. auraData.name .. stacks .. " (ID: " .. auraData.spellId .. ")")
+            if not issecretvalue(auraData.name) then
+                local stacks = (auraData.applications and auraData.applications > 1) and (" x" .. auraData.applications) or ""
+                print("  " .. i .. ". " .. auraData.name .. stacks .. " (ID: " .. auraData.spellId .. ")")
+            end
         end
         if #auras == 0 then
             print("  No buffs active")
